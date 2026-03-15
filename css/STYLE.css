@@ -2113,6 +2113,15 @@ html.light-mode .bio-modal-card::after {
   overflow-y: hidden;
   display: flex;
   flex-direction: column;
+  background: #231F20;
+  border: none;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  transition: background-color 0.6s ease;
+}
+.game-modal-card.game-loaded {
+  background: #000;
 }
 
 .game-modal-card .modal-content {
@@ -2131,8 +2140,8 @@ html.light-mode .bio-modal-card::after {
   min-height: 0;
   border-radius: 10px;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: #000;
+  border: none;
+  background: transparent;
   position: relative;
 }
 

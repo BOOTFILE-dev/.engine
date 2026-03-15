@@ -350,10 +350,20 @@ _constructs["iframe"] = function(shell, schema, key) {
 
   var iframe = document.getElementById(iframeId);
   var resizeHandler = null;
+  var card = shell.el.querySelector('.modal-card');
+
+  // ── Unity load detection: crossfade card background to black ──
+  // Listen for postMessage from Unity builds signalling game-ready.
+  window.addEventListener('message', function (e) {
+    if (e.data && e.data.type === 'unity-ready' && card) {
+      card.classList.add('game-loaded');
+    }
+  });
 
   var reg = registerModal(schema.elementId, {
     key: key,
     onClose: function () {
+      if (card) card.classList.remove('game-loaded');
       if (iframe) iframe.src = "";
       if (schema.fitToContainer) {
         iframe.style.transform = '';
@@ -1454,7 +1464,7 @@ function _bootBiography(settings) {
   if (el) _initBioWiring(el, id);
 }
 
-if (window.__SETTINGS && window.__SETTINGS.modals && window.__SETTINGS.modals.biography) {
+if (window.__SETTINGS && window.__SETTINGS.modals && typeof window.__SETTINGS.modals.biography === 'object') {
   _bootBiography(window.__SETTINGS);
 } else {
   window.addEventListener('settingsReady', function (e) {
