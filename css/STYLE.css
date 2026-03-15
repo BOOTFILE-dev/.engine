@@ -3422,6 +3422,10 @@ html.light-mode .scroll-hint {
   animation: bounce-y 1.8s ease-in-out infinite, tl-glow-pulse-light 3s ease-in-out infinite;
 }
 
+html.light-mode .parallax-window-hero .scroll-hint {
+  animation: bounce-y-hero 1.8s ease-in-out infinite, tl-glow-pulse-light 3s ease-in-out infinite;
+}
+
 html.light-mode a.scroll-hint:hover {
   color: rgba(0, 0, 0, 0.7);
 }
