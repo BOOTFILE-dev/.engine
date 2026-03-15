@@ -317,6 +317,12 @@
       var activeToggler = (t.togglers || []).filter(function (g) { return g.active; })[0] || (t.togglers || [])[0];
       var initialOpen    = activeToggler ? (activeToggler.open || "") : (t.open || "");
       var initialOpenArg = activeToggler ? (activeToggler.openArg || "") : "";
+      var initialNavDs   = activeToggler ? (activeToggler.navigateDataset || "") : "";
+      var initialNavId   = activeToggler ? (activeToggler.navigateId || "") : "";
+      var initialGameUrl = activeToggler ? (activeToggler.gameUrl || "") : "";
+      var initialGameTitle = activeToggler ? (activeToggler.gameTitle || "") : "";
+      var initialGameW   = activeToggler ? (activeToggler.gameW || "") : "";
+      var initialGameH   = activeToggler ? (activeToggler.gameH || "") : "";
 
       // Toggler badges (radio buttons)
       var togglerHtml = "";
@@ -327,8 +333,14 @@
           var dataSrc = tog.src ? ' data-src="' + tog.src + '"' : "";
           var dataOpen = tog.open ? ' data-open="' + tog.open + '"' : "";
           var dataOpenArg = tog.openArg ? ' data-open-arg="' + tog.openArg + '"' : "";
+          var dataNavDs = tog.navigateDataset ? ' data-navigate-dataset="' + tog.navigateDataset + '"' : "";
+          var dataNavId = tog.navigateId ? ' data-navigate-id="' + tog.navigateId + '"' : "";
+          var dataGameUrl = tog.gameUrl ? ' data-game-url="' + tog.gameUrl + '"' : "";
+          var dataGameTitle = tog.gameTitle ? ' data-game-title="' + tog.gameTitle + '"' : "";
+          var dataGameW = tog.gameW ? ' data-game-w="' + tog.gameW + '"' : "";
+          var dataGameH = tog.gameH ? ' data-game-h="' + tog.gameH + '"' : "";
           var inlineStyle = accentVar + (i === 0 ? ";margin-left:auto" : "");
-          return '<span class="' + cls + '"' + dataSrc + dataOpen + dataOpenArg +
+          return '<span class="' + cls + '"' + dataSrc + dataOpen + dataOpenArg + dataNavDs + dataNavId + dataGameUrl + dataGameTitle + dataGameW + dataGameH +
             ' style="' + inlineStyle + '"' +
             ' aria-label="' + tog.label + '" role="radio" aria-checked="' + (tog.active ? "true" : "false") + '" tabindex="0">' +
             '<span class="toggler-dot">' + (tog.dot || "🔵") + "</span> " + tog.label + "</span>";
@@ -350,6 +362,12 @@
         ' data-action="' + (t.action || "open") + '"' +
         ' data-open="' + initialOpen + '"' +
         (initialOpenArg ? ' data-open-arg="' + initialOpenArg + '"' : '') +
+        (initialNavDs ? ' data-navigate-dataset="' + initialNavDs + '"' : '') +
+        (initialNavId ? ' data-navigate-id="' + initialNavId + '"' : '') +
+        (initialGameUrl ? ' data-game-url="' + initialGameUrl + '"' : '') +
+        (initialGameTitle ? ' data-game-title="' + initialGameTitle + '"' : '') +
+        (initialGameW ? ' data-game-w="' + initialGameW + '"' : '') +
+        (initialGameH ? ' data-game-h="' + initialGameH + '"' : '') +
         " onkeydown=\"if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}\">" +
         '<div class="video-label">' + (t.emoji || "") + " " + t.label + togglerHtml + "</div>" +
         '<div class="video-wrap">' + contentHtml + "</div>" +
@@ -393,6 +411,30 @@
         tile.dataset.openArg = toggler.dataset.openArg;
       } else {
         delete tile.dataset.openArg;
+      }
+
+      // Update navigate target (for action="navigate" tiles)
+      if (toggler.dataset.navigateDataset) {
+        tile.dataset.navigateDataset = toggler.dataset.navigateDataset;
+      } else {
+        delete tile.dataset.navigateDataset;
+      }
+      if (toggler.dataset.navigateId) {
+        tile.dataset.navigateId = toggler.dataset.navigateId;
+      } else {
+        delete tile.dataset.navigateId;
+      }
+
+      // Update game target (for action="play" tiles)
+      ['gameUrl', 'gameTitle', 'gameW', 'gameH'].forEach(function (k) {
+        if (toggler.dataset[k]) { tile.dataset[k] = toggler.dataset[k]; }
+        else { delete tile.dataset[k]; }
+      });
+
+      // Auto-fire the tile action after toggler switch
+      var action = tile.dataset.action || '';
+      if (action === 'play' || action === 'navigate' || action === 'modal') {
+        tile.click();
       }
     });
 

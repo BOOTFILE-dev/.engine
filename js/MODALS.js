@@ -969,6 +969,12 @@ document.addEventListener("click", function(e) {
       var fn = window[fnName];
       if (fn) fn(openArg);
     }
+  } else if (action === "play" || action === "scroll-play") {
+    var gUrl = card.dataset.gameUrl || '';
+    var gTitle = card.dataset.gameTitle || 'Game';
+    var gW = parseInt(card.dataset.gameW, 10) || 960;
+    var gH = parseInt(card.dataset.gameH, 10) || 600;
+    openModal('game', gUrl, gTitle, gW, gH);
   } else if (action === "scroll-navigate" || action === "navigate") {
     openModal('entry', card.dataset.navigateDataset, card.dataset.navigateId);
   } else if (action === "scroll-modal" || action === "modal") {
