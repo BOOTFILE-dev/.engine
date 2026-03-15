@@ -575,9 +575,9 @@
   function _hydrateFooter(footer) {
     var footerText = document.querySelector(".landing-footer-text");
     if (!footerText) return;
-    var fHtml = footer.text || "";
+    var fHtml = "";
     if (footer.author) {
-      fHtml += ' — by <a href="' + (footer.author.url || "#") + '" target="_blank" rel="noopener" class="landing-link">' + footer.author.name + "</a>";
+      fHtml = '<a href="' + (footer.author.url || "#") + '" target="_blank" rel="noopener" class="landing-link">' + footer.author.name + "</a>";
     }
     footerText.innerHTML = fHtml;
   }

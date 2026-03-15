@@ -222,7 +222,8 @@ function _renderHero(heroData) {
   html += '>';
 
   if (h.portraitType === "emoji") {
-    html += '<span class="hero-portrait emoji-portrait" aria-label="' + (identity.name || "") + '">' + (identity.emoji || "") + '</span>';
+    var bgStyle = h.portraitBackground ? ' style="background-image:url(' + h.portraitBackground + ');background-size:cover;background-position:center;"' : '';
+    html += '<span class="hero-portrait emoji-portrait"' + bgStyle + ' aria-label="' + (identity.name || "") + '">' + (identity.emoji || "") + '</span>';
   } else {
     html += '<img class="hero-portrait" src="' + (identity.portrait || "") + '" alt="' + (identity.name || "") + '">';
   }

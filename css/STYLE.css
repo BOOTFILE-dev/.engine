@@ -2810,6 +2810,8 @@ html.light-mode .bio-modal-card::after {
   text-shadow: 0 0 30px rgba(var(--accent-1), 0.5),
                0 0 60px rgba(var(--accent-1), 0.2);
   background: rgba(0, 0, 0, 0.3);
+  background-size: cover;
+  background-position: center;
 }
 
 html.light-mode .emoji-portrait {
