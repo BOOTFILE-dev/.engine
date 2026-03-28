@@ -114,9 +114,9 @@
       if (footerYear) footerYear.textContent = new Date().getFullYear();
 
       // ── 10. Console greeting ───────────────────────────────
-      if (s.console && s.console.greeting) {
-        console.log(s.console.greeting);
-      }
+      // if (s.console && s.console.greeting) {
+      //   console.log(s.console.greeting);
+      // }
 
       // ── 11. Connect section (mutilar) ──────────────────────
       if (s.connect) {
