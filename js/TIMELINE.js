@@ -4,9 +4,13 @@
 //  Y-axis = time (month granularity, newest at top).
 //  Each entry is a sliver whose height ∝ duration in months
 //  (min 1 month). Concurrent entries share horizontal width.
+//
+//  Driven by SETTINGS.json → "type": "viz", "layout": "timeline".
+//  Schema fields: elementId, ariaLabel, categories[], startDynamic.
 // ═══════════════════════════════════════════════════════════════
-(() => {
-  const timelineModal = document.getElementById("timeline-modal");
+window._registerVizLayout("timeline", function(schema, key) {
+  var categories = schema.categories || ["robotics", "games", "software", "research", "education"];
+  var timelineModal = ensureModalOverlay(schema.elementId, { ariaLabel: schema.ariaLabel || "Timeline" });
 
   // ── Timeline modal shell (replaces TIMELINE-MODAL.HTML fragment) ──
   var _tlFilterHTML = '';
@@ -16,7 +20,7 @@
     ' title="Static: items keep their positions when filtering. Dynamic: timeline reflows to fit visible items."' +
     ' aria-label="Toggle static or dynamic layout">\uD83D\uDD00</button>';
   _tlFilterHTML += '<button class="viz-filter active" data-filter="all" style="--tc:255,255,255;--tc-light:30,30,30" aria-pressed="true" aria-label="Show all categories"><span class="all-indicator">\u2B1C</span></button>';
-  ["robotics", "games", "software", "research", "education"].forEach(function(k) {
+  categories.forEach(function(k) {
     var t = VIZ_THEMES[k];
     var tc = (t.accent != null && _tlAccents[t.accent]) ? _tlAccents[t.accent].replace(/\s/g, '') : t.color || '';
     _tlFilterHTML += '<button class="viz-filter" data-filter="' + k + '" style="--tc:' + tc + '" aria-pressed="false" aria-label="Filter: ' + t.label + '">' +
@@ -52,7 +56,7 @@
   /* ── Thematic work-stream categories (from VIZ.JS) ────────── */
   // timeline uses VIZ_THEMES with altColor for software
   const themeConfig = {};
-  ["robotics", "games", "software", "research", "education"].forEach(function (k) {
+  categories.forEach(function (k) {
     var src = VIZ_THEMES[k];
     themeConfig[k] = { color: (k === "software" ? src.altColor : src.color) || src.color, icon: src.icon, label: src.label };
   });
@@ -64,11 +68,12 @@
   }
 
   let timelineBuilt = false;
-  let activeFilters = new Set(["robotics", "games", "software", "research", "education"]);
+  let activeFilters = new Set(categories);
 
   // ── Open / close ───────────────────────────────────────────
-  var _tlReg = registerModal("timeline-modal", {
-    ariaLabel: "Timeline",
+  var _tlReg = registerModal(schema.elementId, {
+    key: key,
+    ariaLabel: schema.ariaLabel || "Timeline",
     onOpen: function () {
       _filterSys.setAll();
       if (!timelineBuilt) buildTimeline();
@@ -95,7 +100,7 @@
   window.closeTimelineModal = closeTimelineModal;
 
   // ── Filter buttons (via VIZ.JS shared filter system) ────────
-  const allThemes = ["robotics", "games", "software", "research", "education"];
+  const allThemes = categories;
   const allBtn = timelineModal.querySelector('.viz-filter[data-filter="all"]');
   const themeBtns = timelineModal.querySelectorAll('.viz-filter:not([data-filter="all"])');
 
@@ -123,7 +128,7 @@
         s.el.classList.toggle("tl-hidden", hide);
       });
     },
-    startStatic: false,  // timeline defaults to Dynamic
+    startStatic: !schema.startDynamic,
   });
 
   /** All layout data is stored here after first build */
@@ -797,4 +802,6 @@
 
     return el;
   }
-})();
+
+  return { el: timelineModal, open: openTimelineModal, close: closeTimelineModal };
+});

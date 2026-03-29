@@ -1155,18 +1155,12 @@
      ═════════════════════════════════════════════════════════════ */
 
   function createDiagram(cfg) {
-    let modal = document.getElementById(cfg.modalId);
+    var ariaLabel = cfg.ariaLabel || "Diagram";
+    var modal = ensureModalOverlay(cfg.modalId, { ariaLabel: ariaLabel });
 
-    // Auto-create modal overlay + inner DOM if not present.
-    // This is the ONLY template — no separate HTML fragment needed.
-    if (!modal) {
+    // Populate inner DOM if empty (first instantiation).
+    if (!modal.querySelector(".viz-viewport")) {
       var liveId = cfg.modalId + "-live";
-      var ariaLabel = cfg.ariaLabel || "Diagram";
-      modal = document.createElement("div");
-      modal.className = "modal-overlay";
-      modal.id = cfg.modalId;
-      modal.setAttribute("role", "dialog");
-      modal.setAttribute("aria-label", ariaLabel);
       modal.innerHTML =
         '<div class="glass-tile modal-card viz-modal-card mm-modal-card" style="position:relative;">' +
           '<div class="modal-sticky-bar">' +
@@ -1185,7 +1179,6 @@
             '</div>' +
           '</div>' +
         '</div>';
-      document.body.appendChild(modal);
     }
 
     // Ensure filterId is wired even on pre-existing DOM
@@ -1709,5 +1702,22 @@
     var fn = window[_genericCache[mdFile].openGlobal];
     if (fn) fn();
   };
+
+  // ── Register with viz construct system ──────────────────────
+  window._registerVizLayout("mermaid", function(schema, key) {
+    var mdFile = schema.mdFile;
+    if (!mdFile) return null;
+    return {
+      el: null,
+      open: function() { window.openMermaidModal(mdFile, schema); },
+      close: function() {
+        var cached = _genericCache[mdFile];
+        if (cached) {
+          var fn = window[cached.closeGlobal];
+          if (fn) fn();
+        }
+      }
+    };
+  });
 
 })();

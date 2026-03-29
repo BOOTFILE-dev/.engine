@@ -195,11 +195,8 @@ window.closeModal = function (key) {
 //  under "modals" and (if needed) a new construct function below.
 //  No hardcoded HTML. No IIFEs. Pure schema → DOM hydration.
 // ═══════════════════════════════════════════════════════════════
-function _ensureOverlay(id) {
-  var el = document.getElementById(id);
-  if (!el) { el = document.createElement('div'); el.className = 'modal-overlay'; el.id = id; document.body.appendChild(el); }
-  return el;
-}
+// ensureModalOverlay + buildVizShell live in VIZ.JS (order 3).
+var _ensureOverlay = ensureModalOverlay;
 
 // ─── Universal shell: every modal gets the same outer frame ──
 function _buildModalShell(schema) {
@@ -513,122 +510,7 @@ _constructs["pdf"] = function(shell, schema, key) {
   return { onOpen: null, onClose: null };
 };
 
-// ═══════════════════════════════════════════════════════════════
-//  VIZ SHELL BUILDER — shared by knowledge-graph & mtg-tree
-//
-//  buildVizShell(modalEl, cfg) → { closeBtn, layoutToggle, filterRefs, viewport, svgEl }
-//
-//  cfg: {
-//    cardClass   – extra CSS class on .modal-card (e.g. "kg-modal-card")
-//    closeId     – id for close button
-//    toggleId    – id for layout toggle button
-//    toggleIcon  – emoji for toggle (default "📌")
-//    toggleTc    – --tc color for toggle (default "0,120,212")
-//    toggleTitle – tooltip (optional)
-//    svgClass    – CSS class on edge SVG (e.g. "kg-edges")
-//    filterGroups – [{
-//        btnClass   – CSS class for buttons in this group ("viz-filter")
-//        dataAttr   – data attribute name ("filter", "type", "color", "deck")
-//        separator  – bool: prepend a "|" separator before this group
-//        items      – [{
-//          value, tc, tcLight?, emoji, dot?, ariaLabel?,
-//          allIndicator? (for "all" buttons)
-//        }]
-//    }]
-//    accessibility – { role?, ariaRoledescription?, ariaLabel?, srDescriptions?:string[] }
-//  }
-// ═══════════════════════════════════════════════════════════════
-function buildVizShell(modalEl, cfg) {
-  var cardCls = "glass-tile modal-card viz-modal-card" + (cfg.cardClass ? " " + cfg.cardClass : "");
-
-  // ── Filter toolbar buttons ──
-  var filterHTML = "";
-  (cfg.filterGroups || []).forEach(function (group) {
-    if (group.separator) {
-      var sepCls = group.separatorClass || "viz-filter-sep";
-      filterHTML += '<span class="' + sepCls + '" aria-hidden="true">│</span>';
-    }
-    group.items.forEach(function (item) {
-      var cls = group.btnClass || "viz-filter";
-      var active = item.active ? " active" : "";
-      var dataStr = ' data-' + group.dataAttr + '="' + item.value + '"';
-      if (group.filterGroup) dataStr += ' data-filter-group="' + group.filterGroup + '"';
-      var style = ' style="--tc:' + item.tc;
-      if (item.tcLight) style += ';--tc-light:' + item.tcLight;
-      style += '"';
-      var ariaP = item.ariaPressed != null ? ' aria-pressed="' + item.ariaPressed + '"' : '';
-      var ariaL = item.ariaLabel ? ' aria-label="' + item.ariaLabel + '"' : '';
-      var titleAttr = item.title ? ' title="' + item.title + '"' : '';
-      var dot = "";
-      if (item.allIndicator) {
-        dot = '<span class="all-indicator">' + item.allIndicator + '</span>';
-      } else if (item.dot) {
-        dot = '<span class="viz-dot" style="background:rgba(' + item.dot + ',0.9);"></span> ';
-      }
-      var label = item.trailingLabel || "";
-      filterHTML += '<button class="' + cls + active + '"' + dataStr + style + ariaP + ariaL + titleAttr + '>' +
-        dot + item.emoji + (label ? " " + label : "") + '</button>';
-    });
-  });
-
-  // ── Toggle button ──
-  var _toggleAccents = (window.__SETTINGS && window.__SETTINGS.accents) || [];
-  var toggleTc = cfg.toggleTc || (_toggleAccents[0] || "0,164,239").replace(/\s/g, '');
-  var toggleIcon = cfg.toggleIcon || "📌";
-  var toggleTitle = cfg.toggleTitle || "Static: nodes keep their positions when filtering. Dynamic: nodes reflow into new positions.";
-  var toggleAria = ' aria-label="Toggle static or dynamic layout"';
-  var toggleHTML = '<button class="viz-layout-toggle" id="' + cfg.toggleId + '" style="--tc:' + toggleTc + '"' +
-    ' title="' + toggleTitle + '"' + toggleAria + '>' + toggleIcon + '</button>';
-
-  // ── Close button ──
-  var closeHTML = '<button class="modal-close" id="' + cfg.closeId + '" aria-label="Close modal">&times;</button>';
-
-  // ── Accessibility ──
-  var acc = cfg.accessibility || {};
-  var vpRole = acc.role ? ' role="' + acc.role + '"' : '';
-  var vpRD   = acc.ariaRoledescription ? ' aria-roledescription="' + acc.ariaRoledescription + '"' : '';
-  var vpAL   = acc.ariaLabel ? ' aria-label="' + acc.ariaLabel + '"' : '';
-  var srHTML  = "";
-  if (acc.liveRegionId) {
-    srHTML += '<div class="sr-only" id="' + acc.liveRegionId + '" aria-live="polite" aria-atomic="true"></div>';
-  }
-  if (acc.srDescriptions) {
-    acc.srDescriptions.forEach(function (desc) {
-      srHTML += '<div class="sr-only">' + desc + '</div>';
-    });
-  }
-
-  // ── Toolbar a11y ──
-  var tbRole  = acc.toolbarLabel ? ' role="toolbar" aria-label="' + acc.toolbarLabel + '"' : '';
-
-  // ── Assemble HTML ──
-  modalEl.innerHTML =
-    '<div class="' + cardCls + '" style="position:relative;">' +
-      '<div class="modal-sticky-bar">' +
-        '<div class="viz-filter-group tl-glow"' + tbRole + '>' +
-          '<div class="viz-filter-row">' +
-            toggleHTML + filterHTML + closeHTML +
-          '</div>' +
-        '</div>' +
-      '</div>' +
-      '<div class="viz-viewport" style="cursor:grab;"' + vpRole + vpRD + vpAL + '>' +
-        srHTML +
-        '<div class="viz-world">' +
-          '<svg class="' + (cfg.svgClass || "kg-edges") + '" xmlns="http://www.w3.org/2000/svg" viewBox="-2000 -2000 4000 4000" aria-hidden="true"></svg>' +
-        '</div>' +
-      '</div>' +
-    '</div>';
-
-  // ── Return DOM refs ──
-  return {
-    closeBtn: document.getElementById(cfg.closeId),
-    layoutToggle: document.getElementById(cfg.toggleId),
-    viewport: modalEl.querySelector(".viz-viewport"),
-    svgEl: modalEl.querySelector("." + (cfg.svgClass || "kg-edges")),
-    world: modalEl.querySelector(".viz-world"),
-  };
-}
-window.buildVizShell = buildVizShell;
+// buildVizShell has moved to VIZ.JS (order 3).
 
 // ┌─────────────────────────────────────────────────────────────┐
 // │  CONSTRUCT: deck — MTG deck carousel modal                  │
@@ -907,6 +789,49 @@ _constructs["deck"] = function(shell, schema, key) {
 };
 
 // ═══════════════════════════════════════════════════════════════
+//  VIZ CONSTRUCT — schema-driven visualization modals
+//
+//  SETTINGS.json → "type": "viz", "layout": "timeline" | "skilltree" | …
+//  Layout engines register themselves via _registerVizLayout(name, factory).
+//  Engines load at order 5; constructs hydrate at order 4.
+//  Pending schemas queue until the engine registers.
+// ═══════════════════════════════════════════════════════════════
+var _vizPending = {};   // layout → [{ schema, key }]
+var _vizEngines = {};   // layout → factory(schema, key) → { el, open, close }?
+
+_constructs["viz"] = function(shell, schema, key) {
+  var layout = schema.layout;
+  if (_vizEngines[layout]) {
+    var result = _vizEngines[layout](schema, key);
+    if (result && result.open) {
+      _modalByKey[key] = { el: result.el || null, open: result.open, close: result.close };
+    }
+  } else {
+    _vizPending[layout] = _vizPending[layout] || [];
+    _vizPending[layout].push({ schema: schema, key: key });
+  }
+  return {};
+};
+
+/**
+ * Register a viz layout engine. Called by TIMELINE.js, SKILLTREE.js, MERMAID.js
+ * after they load (order 5). Boots any pending schemas of that layout type.
+ */
+window._registerVizLayout = function(name, factory) {
+  _vizEngines[name] = factory;
+  var pending = _vizPending[name];
+  if (pending) {
+    pending.forEach(function(p) {
+      var result = factory(p.schema, p.key);
+      if (result && result.open) {
+        _modalByKey[p.key] = { el: result.el || null, open: result.open, close: result.close };
+      }
+    });
+    delete _vizPending[name];
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════
 //  MODAL HYDRATION BOOT LOOP
 //  Reads SETTINGS.json → modals{} and builds each typed construct.
 //  biography is handled separately (needs post-hydrate wiring).
@@ -920,7 +845,8 @@ function _hydrateModals(settings) {
     if (schema.type === 'biography') return;
     var construct = _constructs[schema.type];
     if (!construct) return;
-    var shell = _buildModalShell(schema);
+    // Viz constructs build their own shell (filter toolbar + viewport)
+    var shell = schema.type === 'viz' ? null : _buildModalShell(schema);
     construct(shell, schema, key);
   });
 }

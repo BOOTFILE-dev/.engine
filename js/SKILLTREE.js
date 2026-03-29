@@ -1,23 +1,28 @@
 // ═══════════════════════════════════════════════════════════════
-//  SKILL TREE — Reusable radial node-graph visualization engine
+//  SKILL TREE — Schema-driven radial node-graph visualization
 //
 //  Architecture:
-//    1. createSkillTree(cfg) — global factory (reusable core)
+//    1. createSkillTree(cfg) — shared reusable core
 //       Handles: modal open/close, multi-axis filter toggles,
 //       collision resolution, pan/zoom, proximity glow,
 //       entrance animation, edge SVG creation.
 //
-//    2. Portfolio instance (IIFE at bottom) — "Graph of Knowledge"
-//       Passes portfolio-specific config: themes, dates, quadrants,
-//       whispers, tour, threads, etc.
+//    2. "radial" layout (registered via _registerVizLayout)
+//       → _radialFactory(vizCfg, rawData, key)
+//       Reads EVERYTHING from the data file's viz{} schema.
+//       Zero adapter code per dataset.
 //
-//  Any dataset can be visualized by calling createSkillTree() with
-//  a different config object (e.g. the MTG instance at the bottom).
+//       To add a new radial viz:
+//         1. Add JSON file with conforming viz{} + data sections
+//         2. Add to SETTINGS.json data.sources
+//         3. Add modal entry: { "type":"viz", "layout":"radial",
+//            "dataSource":"FOO" }
+//         — No engine code changes required.
 //
 //  Depends on: VIZ.JS  (initPanZoom, createFilterSystem,
 //                        createExploreHint, animateCameraFit,
 //                        createLayoutToggle, createCrossfader)
-//              MODALS.JS (toggleModal)
+//              MODALS.JS (toggleModal, _registerVizLayout)
 // ═══════════════════════════════════════════════════════════════
 
 
@@ -26,7 +31,10 @@
 //
 //  cfg fields:
 //    modal            – DOM .modal-overlay element
-//    closeBtn         – DOM close button
+//    closeBtn         – DOM close button (optional if shellConfig provided)
+//    shellConfig      – optional config object for buildVizShell(); if provided
+//                       and no .viz-viewport exists, builds the shell internally.
+//                       closeBtn falls back to shell.closeBtn.
 //    edgeSvgSelector  – CSS selector for SVG edge layer (default ".kg-edges")
 //    filterBtnClass   – CSS class on filter buttons (default "viz-filter")
 //
@@ -53,7 +61,7 @@
 //    collisionPadding / collisionIters   – physics (defaults 2/80)
 //    ignoreSelector   – extra CSS selector to pass through clicks (optional)
 //
-//  Returns: { open, close, getNodes, getHubs, getTransform, applyFilters, updateGlow }
+//  Returns: { open, close, shell, getNodes, getHubs, getTransform, applyFilters, updateGlow }
 // ─────────────────────────────────────────────────────────────
 
 /* ── Shared text helpers (used by both portfolio & MTG trees) ── */
@@ -157,7 +165,13 @@ function createNodeEl(opts) {
 
 function createSkillTree(cfg) {
   var modal    = cfg.modal;
-  var closeBtn = cfg.closeBtn;
+
+  // Build viz shell internally if shellConfig is provided
+  var _shell = null;
+  if (cfg.shellConfig && !modal.querySelector(".viz-viewport")) {
+    _shell = buildVizShell(modal, cfg.shellConfig);
+  }
+  var closeBtn = cfg.closeBtn || (_shell && _shell.closeBtn);
   if (!modal || !closeBtn) return null;
 
   /* ── State ───────────────────────────────────────────────── */
@@ -623,6 +637,7 @@ function createSkillTree(cfg) {
   return {
     open:          open,
     close:         close,
+    shell:         _shell,
     getNodes:      function () { return _nodes; },
     getHubs:       function () { return _hubs; },
     getThreads:    function () { return _threads; },
@@ -639,1330 +654,382 @@ function createSkillTree(cfg) {
 
 
 // ═══════════════════════════════════════════════════════════════
-//  GRAPH OF KNOWLEDGE — Portfolio instance
+//  RADIAL VIZ — The single public layout engine
 //
-//  Uses createSkillTree() but with extensive portfolio-specific
-//  additions: quadrant layout, date-based positioning, whisper
-//  crossfade, threads (Bézier work/education/projects paths),
-//  dynamic relayout, and guided tour.
+//  SETTINGS.json → { "type": "viz", "layout": "radial", "dataSource": "PORTFOLIO" }
+//  Reads viz{} from DATA_REGISTRY[dataSource] at boot time.
 //
-//  These features use the factory for open/close and pan/zoom
-//  but keep their own custom buildGraph() since the portfolio's
-//  node creation, thread system, and tour are too specialized
-//  to generalize into the factory without over-engineering.
+//  Adding a new radial viz to the site:
+//    1. Add a JSON file with a conforming "viz" block + data sections
+//    2. Add it to SETTINGS.json data.sources
+//    3. Add a modal entry: { "type": "viz", "layout": "radial", "dataSource": "FOO" }
+//    — Zero engine code changes required.
 // ═══════════════════════════════════════════════════════════════
-(() => {
-  const graphModal = document.getElementById("knowledge-modal");
+window._registerVizLayout("radial", function (schema, key) {
+  var sourceKey = (schema.dataSource || "").toLowerCase();
+  var elementId = key.replace(/([A-Z])/g, function (m) { return '-' + m.toLowerCase(); });
+  var modal = ensureModalOverlay(elementId, { ariaLabel: schema.ariaLabel || key });
 
-  /* ── Build viz shell from VIZ_THEMES (no HTML fragment needed) ── */
-  const _kgFilterItems = [
-    { value: "all", tc: "255,255,255", tcLight: "30,30,30", allIndicator: "⬜", emoji: "", active: true, ariaPressed: "true", ariaLabel: "Show all categories" }
-  ];
-  ["robotics", "games", "software", "education", "work", "projects"].forEach(function (k) {
-    var t = VIZ_THEMES[k];
-    _kgFilterItems.push({ value: k, tc: t.color, dot: t.color, emoji: t.emoji, ariaPressed: "false", ariaLabel: "Filter: " + t.label });
-  });
+  var _inner = null;
+  var _bootAttempted = false;
 
-  var _kgShell = buildVizShell(graphModal, {
-    cardClass:  "kg-modal-card",
-    closeId:    "knowledgeModalClose",
-    toggleId:   "kgLayoutToggle",
-    svgClass:   "kg-edges",
-    filterGroups: [{
+  function _ensureBoot() {
+    if (_inner) return true;
+    if (_bootAttempted) return false;
+    var rawData = DATA_REGISTRY[sourceKey];
+    if (!rawData || !rawData.viz) return false;
+    _bootAttempted = true;
+    _inner = _radialFactory(rawData.viz, rawData, key);
+    return !!_inner;
+  }
+
+  _ensureBoot();
+  if (!_inner) {
+    window.addEventListener("portfolioDataReady", function handler() {
+      window.removeEventListener("portfolioDataReady", handler);
+      _ensureBoot();
+    });
+  }
+
+  return {
+    el: modal,
+    open: function () {
+      if (_ensureBoot() && _inner.open) {
+        _inner.open.apply(null, arguments);
+      } else {
+        var args = Array.prototype.slice.call(arguments);
+        window.addEventListener("portfolioDataReady", function h() {
+          window.removeEventListener("portfolioDataReady", h);
+          if (_ensureBoot() && _inner.open) _inner.open.apply(null, args);
+        });
+      }
+    },
+    close: function () {
+      if (_inner && _inner.close) _inner.close();
+    }
+  };
+});
+
+
+// ═══════════════════════════════════════════════════════════════
+//  _radialFactory — Schema-driven radial viz engine.
+//
+//  Reads EVERYTHING from the viz{} JSON schema.
+//  Handles: shell, filters (grouped & independent), nodes
+//  (modalState & sections), hubs, edges (thread & hub),
+//  sizing, collision, camera, glow, tour, keyboard nav.
+//
+//  No per-dataset adapter code. A new JSON file with a
+//  conforming viz{} block "just works".
+// ═══════════════════════════════════════════════════════════════
+function _radialFactory(V, rawData, key) {
+  var nodeCfg    = V.nodes    || {};
+  var sizeCfg    = V.sizing   || {};
+  var camCfg     = V.camera   || {};
+  var colCfg     = V.collision || {};
+  var layCfg     = V.layout   || {};
+  var edgeCfg    = V.edges    || {};
+  var glowCfg    = V.glow     || {};
+  var tourCfg    = V.tour     || {};
+  var centerCfg  = V.center   || null;
+  var filterDefs = V.filters  || [];
+
+  var modal = ensureModalOverlay(V.id, { ariaLabel: V.ariaLabel });
+
+
+  // ── Resolve filter pill items from itemsFrom config ──────────
+  function _resolveFilterItems(fDef) {
+    var items = [
+      { value: "all", tc: "255,255,255", tcLight: "30,30,30", allIndicator: "⬜", emoji: "", active: true }
+    ];
+    var src = fDef.itemsFrom || "";
+
+    if (src === "themes") {
+      var all = (fDef.sectors || []).concat(fDef.overlays || []);
+      all.forEach(function (k) {
+        var t = VIZ_THEMES[k];
+        if (t) items.push({ value: k, tc: t.color, dot: t.color, emoji: t.emoji, active: true });
+      });
+    } else if (src.indexOf("categories.") === 0) {
+      var path = src.split(".");
+      var catObj = rawData;
+      for (var pi = 0; pi < path.length && catObj; pi++) catObj = catObj[path[pi]];
+      if (catObj && typeof catObj === "object") {
+        Object.keys(catObj).forEach(function (k) {
+          var entry = catObj[k];
+          var color = entry.accent != null ? VIZ_resolveAccent(entry.accent) : (entry.color || "160,160,160");
+          items.push({ value: k, tc: color, dot: color, emoji: entry.icon || k, active: true });
+        });
+      }
+    }
+    return items;
+  }
+
+  // ── Build shell ─────────────────────────────────────────────
+  var shellCfg = V.shell || {};
+  var filterGroups = [];
+  filterDefs.forEach(function (fDef) {
+    if (fDef.separator) filterGroups.push({ separator: true, items: [] });
+    filterGroups.push({
       btnClass: "viz-filter",
-      dataAttr: "filter",
-      items: _kgFilterItems,
-    }],
-    accessibility: {
-      toolbarLabel: "Graph filters",
-      role: "application",
-      ariaRoledescription: "Interactive knowledge graph",
-      ariaLabel: "Radial node graph of career items grouped by domain. Use arrow keys to navigate between nodes, Enter to open details.",
-      liveRegionId: "kg-live",
-      srDescriptions: [
-        "Skill graph: radial layout of portfolio items organized by robotics, games, and software domains. Each node represents a project or experience. Use arrow keys to move between nodes; Enter opens details."
-      ],
-    },
-  });
-
-  const graphModalClose = _kgShell.closeBtn;
-
-  /* ── Thematic config (from VIZ.JS) ──────────────────────────── */
-  const themeConfig = {};
-  ["robotics", "games", "software", "education", "work", "projects"].forEach(function (k) {
-    var src = VIZ_THEMES[k];
-    themeConfig[k] = { color: src.color || VIZ_resolveAccent(src.accent), icon: src.icon, label: src.label, emoji: src.emoji };
-  });
-
-  /* ── Thread (overlay-theme) colors — one thread per theme×quadrant pair ── */
-  const threadConfig = {
-    work:      { color: VIZ_resolveAccent(0),  label: "Work" },
-    education: { color: VIZ_resolveAccent(1),  label: "Education" },
-    projects:  { color: VIZ_resolveAccent(2),  label: "Projects" },
-  };
-
-  const themeMap = VIZ_SOURCE_MAP;
-
-  /** Quadrant direction vectors (unit) — 3-way 120° triangle */
-  const quadrantDir = {
-    robotics:  { x: 0,    y: -1    },  // North (up, 270°)
-    games:     { x: -0.866, y: 0.5 },  // South-West (210°)
-    software:  { x:  0.866, y: 0.5 },  // South-East (330°)
-  };
-
-  function getTheme(item) { return themeMap[item.ID] || "software"; }
-
-  /* ── Date parsing (delegated to VIZ.JS) ───────────────────── */
-  var parseDateStart = VIZ_parseDateStart;
-  var parseDateEnd   = VIZ_parseDateEnd;
-
-  /* ── State ────────────────────────────────────────────────── */
-  let graphBuilt = false;
-  let activeFilters = new Set(["robotics", "games", "software", "education", "work", "projects"]);
-  const allThemes = ["robotics", "games", "software", "education", "work", "projects"];
-
-  let _nodes = [];
-  let _hoveredNode = null;
-  let _threads = [];
-  let _transform = { x: 0, y: 0, scale: 1 };
-  let _graphWorld = null;
-  let _edgeSVG = null;
-
-  /* ── Open / close ─────────────────────────────────────────── */
-  var _kgReg = registerModal("knowledge-modal", {
-    key: "knowledgeModal",
-    ariaLabel: "Graph of Knowledge",
-    onOpen: function () {
-      _filterSys.setAll();
-      if (!graphBuilt) buildGraph();
-      else updateTransform();
-      requestAnimationFrame(() => animateEntrance());
-    }
-  });
-  function openKnowledgeModal()  { _kgReg.open(); }
-  function closeKnowledgeModal() { _kgReg.close(); }
-
-  window.openKnowledgeModal  = openKnowledgeModal;
-  window.closeKnowledgeModal = closeKnowledgeModal;
-
-  /* ── Filter buttons (via VIZ.JS shared filter system) ─────── */
-  const allBtn = graphModal.querySelector('.viz-filter[data-filter="all"]');
-  const themeBtns = graphModal.querySelectorAll('.viz-filter:not([data-filter="all"])');
-
-  const quadrantFilters = ["robotics", "games", "software"];
-  const overlayFilters  = ["education", "work", "projects"];
-
-  const _layoutToggle = createLayoutToggle({
-    btn: "kgLayoutToggle",
-    onDynamic: function () { if (graphBuilt) relayoutAndAnimate(); },
-  });
-
-  const _filterSys = createFilterSystem({
-    allThemes: allThemes,
-    activeFilters: activeFilters,
-    allBtn: allBtn,
-    themeBtns: themeBtns,
-    onFilter: applyFilter,
-    soloLogic: function (f, activeFilters, allThemes) {
-      var isQuadrant = quadrantFilters.indexOf(f) !== -1;
-      var sameGroup  = isQuadrant ? quadrantFilters : overlayFilters;
-
-      if (activeFilters.size === allThemes.length) {
-        sameGroup.forEach(function (t) { activeFilters.delete(t); });
-        activeFilters.add(f);
-      } else if (activeFilters.has(f) && activeFilters.size === 1) {
-        allThemes.forEach(function (t) { activeFilters.add(t); });
-      } else if (activeFilters.has(f)) {
-        var siblingsOn = sameGroup.filter(function (t) { return t !== f && activeFilters.has(t); });
-        if (siblingsOn.length === 0) {
-          sameGroup.forEach(function (t) { activeFilters.add(t); });
-        } else {
-          activeFilters.delete(f);
-        }
-      } else {
-        activeFilters.add(f);
-      }
-    },
-  });
-
-  function applyFilter() {
-    const anyQuadrantOn = ["robotics", "games", "software"].some(q => activeFilters.has(q));
-    _nodes.forEach(n => {
-      const quadrantOn = activeFilters.has(n.quadrant);
-      const isEdu = n.theme === "education";
-      const eduOn = activeFilters.has("education");
-      const isWork = n.theme === "work";
-      const workOn = activeFilters.has("work");
-      const isProjects = n.theme === "projects";
-      const projectsOn = activeFilters.has("projects");
-      let hide;
-      if (isEdu) {
-        hide = !eduOn || (anyQuadrantOn && !quadrantOn);
-      } else if (isWork) {
-        hide = !workOn || (anyQuadrantOn && !quadrantOn);
-      } else if (isProjects) {
-        hide = !projectsOn || (anyQuadrantOn && !quadrantOn);
-      } else {
-        hide = !quadrantOn;
-      }
-      n._hidden = hide;
-      n.el.classList.toggle("kg-hidden", hide);
+      dataAttr: fDef.dataAttr || fDef.key,
+      items: _resolveFilterItems(fDef),
     });
+  });
+  shellCfg.filterGroups = filterGroups;
+  var shell = buildVizShell(modal, shellCfg);
+  var closeBtn = shell.closeBtn;
 
-    const activeOverlays = overlayFilters.filter(f => activeFilters.has(f));
-    const singleOverlay = activeOverlays.length === 1;
+  // ── Sector directions (the axis with role "sector" or first filter) ──
+  var sectorAxis = filterDefs.find(function (f) { return f.role === "sector"; }) || filterDefs[0] || {};
+  var sectorKeys = sectorAxis.sectors || [];
+  var overlayKeys = sectorAxis.overlays || [];
+  if (!sectorKeys.length && sectorAxis.itemsFrom) {
+    var si = _resolveFilterItems(sectorAxis);
+    sectorKeys = si.filter(function (x) { return x.value !== "all"; }).map(function (x) { return x.value; });
+  }
 
-    _threads.forEach(th => {
-      const themeOn    = activeFilters.has(th.theme);
-      const quadrantOn = activeFilters.has(th.quadrant);
-      const visible    = themeOn && quadrantOn;
-      th.segments.forEach(seg => {
-        seg.classList.toggle("kg-thread-hidden", !visible);
-        if (visible) {
-          seg.style.opacity = "1";
-        } else {
-          seg.style.opacity = "";
-        }
-      });
+  var sectorDir = {};
+  sectorKeys.forEach(function (k, i) {
+    var angle = (2 * Math.PI * i / sectorKeys.length) - Math.PI / 2;
+    sectorDir[k] = { angle: angle, x: Math.cos(angle), y: Math.sin(angle) };
+  });
 
-      if (visible) {
-        const useQuadrantColor = singleOverlay;
-        const color = useQuadrantColor
-          ? themeConfig[th.quadrant].color
-          : threadConfig[th.theme].color;
-        const markerRef = useQuadrantColor
-          ? `url(#thread-arrow-${th.quadrant})`
-          : `url(#thread-arrow-${th.theme})`;
-        th.segments.forEach(seg => {
-          seg.setAttribute("stroke", `rgb(${color})`);
-          seg.setAttribute("marker-end", markerRef);
+  // ── Sizing function ─────────────────────────────────────────
+  var SIZE_MIN  = sizeCfg.min || 40;
+  var SIZE_MAX  = sizeCfg.max || 100;
+  var SIZE_FIELD = sizeCfg.field;
+  var SIZE_MAX_VAL = sizeCfg.maxValue != null ? sizeCfg.maxValue : null;
+  var SIZE_XFORM = sizeCfg.transform || "linear";
+
+  function _computeSize(val, gMin, gMax) {
+    if (gMax <= gMin) return (SIZE_MIN + SIZE_MAX) / 2;
+    var t = Math.max(0, Math.min(1, (val - gMin) / (gMax - gMin)));
+    if (SIZE_XFORM === "sqrt") t = Math.sqrt(t);
+    else if (SIZE_XFORM === "pow") t = Math.pow(t, sizeCfg.exponent || 0.5);
+    if (sizeCfg.invert) t = 1 - t;
+    return SIZE_MIN + t * (SIZE_MAX - SIZE_MIN);
+  }
+
+  // ── Color function ──────────────────────────────────────────
+  function _resolveColor(item, sectorKey) {
+    var cs = nodeCfg.colorScale;
+    if (cs) {
+      var v = nodeCfg.colorField ? (item[nodeCfg.colorField] || 0) : 0;
+      for (var ci = 0; ci < cs.length; ci++) {
+        if (cs[ci].max == null || v <= cs[ci].max) return VIZ_resolveAccent(cs[ci].accent);
+      }
+      return VIZ_resolveAccent(cs[cs.length - 1].accent);
+    }
+    if (nodeCfg.colorSource === "themes") {
+      var theme = VIZ_THEMES[sectorKey] || VIZ_THEMES[VIZ_SOURCE_MAP[item.ID] || "software"];
+      return theme ? theme.color : "160,160,160";
+    }
+    return "160,160,160";
+  }
+
+  // ── Label / whisper helpers ─────────────────────────────────
+  function _resolveLabel(item) {
+    var lbl = nodeCfg.labelField ? (item[nodeCfg.labelField] || VIZ_SHORTNAME_MAP[item.ID]) : VIZ_SHORTNAME_MAP[item.ID];
+    if (lbl) return lbl;
+    var raw = (item[nodeCfg.labelFallback || "NAME"] || "").replace(/<[^>]+>/g, " ").replace(/[ \t]+/g, " ").trim();
+    return _graphBreakText(raw);
+  }
+
+  var _emojiRe = /^([\p{Emoji_Presentation}\p{Extended_Pictographic}\uFE0F\u200D]+(?:\s*[\p{Emoji_Presentation}\p{Extended_Pictographic}\uFE0F\u200D]+)*)\s*/u;
+
+  function _resolveWhisper(item) {
+    var w = VIZ_WHISPER_MAP[item.ID];
+    if (w) return w;
+    var raw = (item[nodeCfg.whisperField || nodeCfg.labelFallback || "NAME"] || "").replace(/<[^>]+>/g, " ").trim();
+    if (nodeCfg.whisperExtract === "firstEmoji") {
+      var m = raw.match(_emojiRe);
+      if (m) return m[1];
+    } else {
+      var m2 = raw.match(_emojiRe);
+      if (m2) return m2[1];
+    }
+    return _resolveLabel(item).charAt(0);
+  }
+
+  // ── Duration sizing (for "duration" field on modalState items) ──
+  function _computeDuration(item) {
+    var s = VIZ_parseDateStart(item.DATE);
+    var e = VIZ_parseDateEnd(item.DATE);
+    if (s == null) return 3;
+    return Math.max(3, (e || s) - s);
+  }
+
+  // ── Collect items from the appropriate data source ──────────
+  function _collectItems() {
+    var result = [];
+
+    if (nodeCfg.source === "modalState") {
+      var reqFields = nodeCfg.require || [];
+      Object.keys(modalState).forEach(function (sectionId) {
+        (modalState[sectionId] || []).forEach(function (item) {
+          var ok = reqFields.every(function (f) { return item[f]; });
+          if (!ok) return;
+          var sector = item[nodeCfg.sectorField] || VIZ_QUADRANT_MAP[item.ID];
+          if (!sector && nodeCfg.sectorFallback) {
+            sector = item[nodeCfg.sectorFallback] || VIZ_SOURCE_MAP[item.ID] || VIZ_DOMAIN_MAP[item.ID];
+          }
+          if (sectorKeys.length && sectorKeys.indexOf(sector) === -1) {
+            sector = sectorKeys[sectorKeys.length - 1];
+          }
+          result.push({ item: item, sectionId: sectionId, sector: sector });
         });
-      }
-    });
-
-    if (!_layoutToggle.isStatic()) {
-      relayoutAndAnimate();
-    }
-    updateProximityGlow();
-
-    // Smooth-ease the camera to fit visible nodes (like traverse mode)
-    if (!_kgTour || !_kgTour.isTouring()) {
-      var settleDelay = _layoutToggle.isStatic() ? 80 : 700;
-      setTimeout(function () { fitVisibleNodes(true); }, settleDelay);
-    }
-  }
-
-  function relayoutAndAnimate() {
-    const visible = _nodes.filter(n => !n._hidden);
-    if (visible.length === 0) return;
-
-    const quadrants = { robotics: [], games: [], software: [] };
-    visible.forEach(n => {
-      if (quadrants[n.quadrant]) quadrants[n.quadrant].push(n);
-    });
-
-    Object.values(quadrants).forEach(group => {
-      group.sort((a, b) => a.absMonth - b.absMonth);
-    });
-
-    const allMonths = _nodes.map(n => n.absMonth);
-    const globalMin = Math.min(...allMonths);
-    const globalMax = Math.max(...allMonths);
-    const dateRange = Math.max(1, globalMax - globalMin);
-
-    const MIN_DIST     = 100;
-    const MAX_DIST     = 400;
-    const SPREAD_ANGLE = Math.PI / 2.5;
-    const CENTER_R     = 50;
-    const PADDING      = 2;
-    const ITERATIONS   = 60;
-
-    const movable = [];
-    Object.keys(quadrants).forEach(qKey => {
-      const group = quadrants[qKey];
-      if (group.length === 0) return;
-      const dir = quadrantDir[qKey];
-      const baseAngle = Math.atan2(dir.y, dir.x);
-
-      group.forEach((n, idx) => {
-        const t = dateRange > 0 ? (n.absMonth - globalMin) / dateRange : 0.5;
-        const dist = MIN_DIST + Math.sqrt(t) * (MAX_DIST - MIN_DIST);
-        let angle;
-        if (group.length === 1) {
-          angle = baseAngle;
-        } else {
-          const at = idx / (group.length - 1);
-          angle = baseAngle + SPREAD_ANGLE * (at - 0.5);
-        }
-        const seed1 = Math.sin(idx * 7.3 + baseAngle * 13.7);
-        const seed2 = Math.sin(idx * 11.1 + baseAngle * 5.3);
-        const jitterDist  = dist * (1 + seed1 * 0.06);
-        const jitterAngle = angle + seed2 * 0.06;
-
-        n._newX = Math.cos(jitterAngle) * jitterDist;
-        n._newY = Math.sin(jitterAngle) * jitterDist;
-        movable.push(n);
       });
-    });
-
-    for (let iter = 0; iter < ITERATIONS; iter++) {
-      let anyMoved = false;
-
-      for (let i = 0; i < movable.length; i++) {
-        const a = movable[i];
-        const dcx = a._newX;
-        const dcy = a._newY;
-        const distC = Math.sqrt(dcx * dcx + dcy * dcy) || 0.01;
-        const minDistC = a.r + CENTER_R + PADDING;
-        if (distC < minDistC) {
-          const push = (minDistC - distC) / distC;
-          a._newX += dcx * push;
-          a._newY += dcy * push;
-          anyMoved = true;
-        }
-        for (let j = i + 1; j < movable.length; j++) {
-          const b = movable[j];
-          const dx = b._newX - a._newX;
-          const dy = b._newY - a._newY;
-          const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
-          const minDist = a.r + b.r + PADDING;
-          if (dist < minDist) {
-            const overlap = (minDist - dist) / 2;
-            const nx = dx / dist;
-            const ny = dy / dist;
-            a._newX -= nx * overlap;
-            a._newY -= ny * overlap;
-            b._newX += nx * overlap;
-            b._newY += ny * overlap;
-            anyMoved = true;
-          }
-        }
-      }
-      if (!anyMoved) break;
-    }
-
-    const maxDist = Math.max(1, ...visible.map(n => Math.sqrt(n._newX * n._newX + n._newY * n._newY)));
-    const MAX_DELAY = 200;
-
-    visible.forEach((n, i) => {
-      const distFrac = Math.sqrt(n._newX * n._newX + n._newY * n._newY) / maxDist;
-      const delay = distFrac * MAX_DELAY + i * 4;
-
-      setTimeout(() => {
-        n.el.style.transition = "left 0.55s cubic-bezier(0.34, 1.56, 0.64, 1), top 0.55s cubic-bezier(0.34, 1.56, 0.64, 1)";
-        n.el.style.left = n._newX + "px";
-        n.el.style.top  = n._newY + "px";
-        n.targetX = n._newX;
-        n.targetY = n._newY;
-        n.dist = Math.sqrt(n._newX * n._newX + n._newY * n._newY);
-
-        setTimeout(() => {
-          n.el.style.transition = "";
-        }, 600);
-      }, delay);
-    });
-
-    _threads.forEach(th => {
-      const themeOn    = activeFilters.has(th.theme);
-      const quadrantOn = activeFilters.has(th.quadrant);
-      if (!themeOn || !quadrantOn) return;
-
-      th.segments.forEach((seg, i) => {
-        const fromNode = th.nodes[i];
-        const toNode   = th.nodes[i + 1];
-        if (!fromNode || !toNode) return;
-        if (fromNode._hidden || toNode._hidden) return;
-
-        let nx1 = fromNode._newX;
-        let ny1 = fromNode._newY;
-        let nx2 = toNode._newX;
-        let ny2 = toNode._newY;
-
-        const dx = nx2 - nx1;
-        const dy = ny2 - ny1;
-        const len = Math.sqrt(dx * dx + dy * dy);
-        if (len > 0) {
-          const ux = dx / len, uy = dy / len;
-          const fromR = fromNode.r || 30;
-          const toR   = toNode.r || 30;
-          if (len > fromR + toR) {
-            nx1 += ux * fromR;
-            ny1 += uy * fromR;
-            nx2 -= ux * toR;
-            ny2 -= uy * toR;
-          }
-        }
-
-        const ncp = _bezierCtrl(nx1, ny1, nx2, ny2, i);
-
-        const ox1 = seg._cx1 || 0, oy1 = seg._cy1 || 0;
-        const ocx = seg._ccx || 0, ocy = seg._ccy || 0;
-        const ox2 = seg._cx2 || 0, oy2 = seg._cy2 || 0;
-
-        const dur = 550;
-        const start = performance.now() + 50;
-        function animSeg(now) {
-          let t = Math.min(1, (now - start) / dur);
-          if (t < 0) t = 0;
-          const ease = t < 1 ? 1 - Math.pow(1 - t, 3) * (1 + 2.5 * (1 - t) * Math.sin(t * Math.PI)) : 1;
-          const ax1 = ox1 + (nx1 - ox1) * ease;
-          const ay1 = oy1 + (ny1 - oy1) * ease;
-          const acx = ocx + (ncp.x - ocx) * ease;
-          const acy = ocy + (ncp.y - ocy) * ease;
-          const ax2 = ox2 + (nx2 - ox2) * ease;
-          const ay2 = oy2 + (ny2 - oy2) * ease;
-          seg.setAttribute("d", _curveD(ax1, ay1, acx, acy, ax2, ay2));
-          if (t < 1) requestAnimationFrame(animSeg);
-        }
-        requestAnimationFrame(animSeg);
-
-        seg._cx1 = nx1; seg._cy1 = ny1;
-        seg._ccx = ncp.x; seg._ccy = ncp.y;
-        seg._cx2 = nx2; seg._cy2 = ny2;
-      });
-    });
-
-    const totalAnimTime = MAX_DELAY + visible.length * 4 + 600;
-    setTimeout(() => updateProximityGlow(), totalAnimTime);
-  }
-
-  /* ── Pan & Zoom ───────────────────────────────────────────── */
-  const _KG_MIN_SCALE = 1;
-  const _KG_MAX_SCALE = 4;
-
-  let _pz = null;
-
-  let _glowRAF = 0;
-  function updateProximityGlow() {
-    cancelAnimationFrame(_glowRAF);
-    _glowRAF = requestAnimationFrame(() => {
-      const viewport = graphModal.querySelector(".viz-viewport");
-      if (!viewport || _nodes.length === 0) return;
-      const vw = viewport.clientWidth;
-      const vh = viewport.clientHeight;
-      const margin = 0.35;
-      const left   = vw * margin;
-      const right  = vw * (1 - margin);
-      const top    = vh * margin;
-      const bottom = vh * (1 - margin);
-
-      const zoomT = Math.max(0, Math.min(1, (_transform.scale - _KG_MIN_SCALE) / (_KG_MAX_SCALE - _KG_MIN_SCALE)));
-
-      _nodes.forEach(n => {
-        const sx = n.targetX * _transform.scale + _transform.x;
-        const sy = n.targetY * _transform.scale + _transform.y;
-        const inCenter = sx >= left && sx <= right && sy >= top && sy <= bottom;
-        const hovered = n === _hoveredNode;
-        const tourFocus = _kgTour && _kgTour.isTouring() && !n._hidden;
-        const focused = (inCenter || hovered || tourFocus) && !n.el.classList.contains("kg-hidden");
-        n.el.classList.toggle("kg-in-focus", focused);
-
-        if (!n.nameLayer || !n.whisperLayers || n.whisperLayers.length < 2) return;
-
-        if (focused && n.whispers.length) {
-          if (_kgTour && _kgTour.isTouring() && !_tourShowNames) {
-            // Tour whisper phase: show whisper on all visible nodes
-            // (CSS !important handles this, but keep kg-name-show in sync)
-            n.nameLayer.classList.remove("kg-name-show");
-            if (!n.wasFocused) {
-              var cur = n.whisperLayers[n.activeWhisper];
-              cur.innerHTML = n.whispers[0];
-              fitTextToCircle(cur, parseFloat(n.el.style.getPropertyValue('--kg-size')) || 70, (parseFloat(n.el.style.getPropertyValue('--kg-size')) || 70) * 0.50);
-              cur.classList.add("kg-name-show");
-            }
-            n.wasFocused = true;
-            return;
-          }
-          // Focused (glow/hover or tour show-names): show name, hide whisper
-          n.nameLayer.classList.add("kg-name-show");
-          n.whisperLayers[0].classList.remove("kg-name-show");
-          n.whisperLayers[1].classList.remove("kg-name-show");
-          n.wasFocused = false;
-          return;
-        }
-
-        // Not focused — show whisper (if available)
-        if (n.whispers.length) {
-          const idx = Math.min(n.whispers.length - 1, Math.floor(zoomT * n.whispers.length));
-
-          if (!n.wasFocused) {
-            n.nameLayer.classList.remove("kg-name-show");
-            const cur = n.whisperLayers[n.activeWhisper];
-            cur.innerHTML = n.whispers[idx];
-            fitTextToCircle(cur, parseFloat(n.el.style.getPropertyValue('--kg-size')) || 70, (parseFloat(n.el.style.getPropertyValue('--kg-size')) || 70) * 0.50);
-            cur.classList.add("kg-name-show");
-            n.lastWhisperIdx = idx;
-          } else if (idx !== n.lastWhisperIdx) {
-            const outLayer = n.whisperLayers[n.activeWhisper];
-            const inIdx    = 1 - n.activeWhisper;
-            const inLayer  = n.whisperLayers[inIdx];
-            inLayer.innerHTML = n.whispers[idx];
-            fitTextToCircle(inLayer, parseFloat(n.el.style.getPropertyValue('--kg-size')) || 70, (parseFloat(n.el.style.getPropertyValue('--kg-size')) || 70) * 0.50);
-            inLayer.classList.add("kg-name-show");
-            outLayer.classList.remove("kg-name-show");
-            n.activeWhisper = inIdx;
-            n.lastWhisperIdx = idx;
-          }
-          n.wasFocused = true;
-        } else {
-          // No whispers: show name as usual
-          n.nameLayer.classList.add("kg-name-show");
-          n.whisperLayers[0].classList.remove("kg-name-show");
-          n.whisperLayers[1].classList.remove("kg-name-show");
-          n.wasFocused = false;
-        }
-      });
-    });
-  }
-
-  function updateTransform() {
-    if (!_graphWorld) return;
-    if (_pz) { _pz.update(); return; }
-    _graphWorld.style.transform = `translate(${_transform.x}px, ${_transform.y}px) scale(${_transform.scale})`;
-    updateProximityGlow();
-  }
-
-  function bounceBackIfNeeded() {
-    if (_pz) _pz.bounceBackIfNeeded();
-  }
-
-  function _initPanZoom() {
-    const viewport = graphModal.querySelector(".viz-viewport");
-    if (!viewport) return;
-    _pz = initPanZoom(viewport, _graphWorld, _transform, {
-      minScale:       _KG_MIN_SCALE,
-      maxScale:       _KG_MAX_SCALE,
-      zoomStep:       [0.9, 1.1],
-      bounceCurve:    "cubic-bezier(0.34, 1.56, 0.64, 1)",
-      bounceDuration: 380,
-      rubberBandDrag: false,
-      ignoreSelector: ".kg-node, .viz-explore-hint",
-      onUpdate:       () => updateProximityGlow(),
-      getBounds:      () => {
-        const vp = graphModal.querySelector(".viz-viewport");
-        if (!vp || _nodes.length === 0) return null;
-        const vw = vp.clientWidth;
-        const vh = vp.clientHeight;
-        let wMinX = Infinity, wMaxX = -Infinity, wMinY = Infinity, wMaxY = -Infinity;
-        _nodes.forEach(n => {
-          if (n.targetX < wMinX) wMinX = n.targetX;
-          if (n.targetX > wMaxX) wMaxX = n.targetX;
-          if (n.targetY < wMinY) wMinY = n.targetY;
-          if (n.targetY > wMaxY) wMaxY = n.targetY;
+    } else if (nodeCfg.source === "sections") {
+      (rawData.sections || []).forEach(function (sec) {
+        (sec.items || []).forEach(function (item) {
+          var sector = item[nodeCfg.sectorField] || sectorKeys[0];
+          result.push({ item: item, sectionId: sec.id, sector: sector, _section: sec });
         });
-        const m = 80;
-        wMinX -= m; wMaxX += m; wMinY -= m; wMaxY += m;
-        const s = _transform.scale;
-        const pad = 0.48;
-        return {
-          minX: vw * pad - wMaxX * s,
-          maxX: vw * (1 - pad) - wMinX * s,
-          minY: vh * pad - wMaxY * s,
-          maxY: vh * (1 - pad) - wMinY * s,
-        };
-      },
-    });
+      });
+    }
+
+    return result;
   }
 
-  /* ── Bézier curve helpers ─────────────────────────────────── */
+  // ── Sizing bounds ───────────────────────────────────────────
+  function _sizeBounds(collected) {
+    if (!SIZE_FIELD) return { min: 0, max: 1 };
+    if (SIZE_MAX_VAL != null) return { min: 0, max: SIZE_MAX_VAL };
+    var lo = Infinity, hi = -Infinity;
+    collected.forEach(function (c) {
+      var v = c._sizeVal;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    });
+    if (lo === Infinity) { lo = 0; hi = 1; }
+    return { min: lo, max: hi };
+  }
+
+  // ── Card detail modal (for onClick: "card") ─────────────────
+  var _cardReg = null;
+  function _openCardDetail(item) {
+    // Lazy-create the detail overlay
+    if (!_cardReg) {
+      var detailId = V.id + "-card-detail";
+      var el = ensureModalOverlay(detailId, { ariaLabel: "Card Detail" });
+      el.innerHTML =
+        '<div class="glass-tile modal-card kg-detail-card">' +
+          '<div class="modal-sticky-bar"><div class="modal-sticky-group tl-glow">' +
+            '<div class="kg-badges" id="' + detailId + '-badges"></div>' +
+            '<button class="modal-close" aria-label="Close modal">&times;</button>' +
+          '</div></div>' +
+          '<img class="kg-detail-art" id="' + detailId + '-art" src="" alt="" />' +
+        '</div>';
+      _cardReg = registerModal(detailId);
+    }
+
+    var art = document.getElementById(V.id + "-card-detail-art");
+    var badges = document.getElementById(V.id + "-card-detail-badges");
+
+    if (art) {
+      var tmpl = nodeCfg.artTemplate || "";
+      art.src = tmpl.replace("{ID}", item.ID || "");
+      art.alt = (item[nodeCfg.labelFallback || "NAME"] || "").replace(/<[^>]+>/g, "").trim();
+      art.style.display = art.src ? "" : "none";
+    }
+
+    if (badges) {
+      var html = "";
+      filterDefs.forEach(function (fDef) {
+        var val = item[fDef.key.toUpperCase()] || item[fDef.key] || "";
+        var vals = Array.isArray(val) ? val : [val];
+        vals.forEach(function (v) {
+          if (!v) return;
+          // Resolve color from filter items
+          var fi = _resolveFilterItems(fDef);
+          var match = fi.find(function (x) { return x.value === v; });
+          var bc = match ? match.tc : "160,160,160";
+          html += '<span class="kg-badge" style="--bc:' + bc + '">' + v + '</span>';
+        });
+      });
+      badges.innerHTML = html;
+    }
+
+    _cardReg.open();
+  }
+
+  // ── Node click handler ──────────────────────────────────────
+  function _handleClick(entry) {
+    if (nodeCfg.onClick === "entry") {
+      openEntry(entry.sectionId, entry.item.ID);
+    } else if (nodeCfg.onClick === "card") {
+      _openCardDetail(entry.item);
+    }
+  }
+
+  // ── Build filter axes for createSkillTree ───────────────────
+  var _filterAxes = [];
+  filterDefs.forEach(function (fDef) {
+    var items = _resolveFilterItems(fDef);
+    var allValues = items.filter(function (x) { return x.value !== "all"; }).map(function (x) { return x.value; });
+    var dataAttr = fDef.dataAttr || fDef.key;
+    var allBtn   = modal.querySelector('.viz-filter[data-' + dataAttr + '="all"]');
+    var itemBtns = Array.from(modal.querySelectorAll('.viz-filter[data-' + dataAttr + ']')).filter(function (b) {
+      return b.dataset[dataAttr] !== "all";
+    });
+
+    _filterAxes.push({
+      key: dataAttr,
+      allValues: allValues,
+      allBtn: allBtn,
+      itemBtns: itemBtns,
+      _fDef: fDef,
+    });
+  });
+
+  // ── Grouped-mode custom visibility (KG-style sector/overlay logic) ──
+  var _isGrouped = filterDefs.length === 1 && filterDefs[0].mode === "grouped";
+  var _groupedOverlaySet = _isGrouped ? new Set(overlayKeys) : null;
+
+  function _groupedVisible(node, filterSets) {
+    var active = filterSets[_filterAxes[0].key];
+    if (!active) return true;
+    var quadrantOn = active.has(node._sector);
+    var nodeTheme = node._theme;
+    var isOverlay = _groupedOverlaySet.has(nodeTheme);
+    var anyQuadrantOn = sectorKeys.some(function (q) { return active.has(q); });
+    if (isOverlay) {
+      return active.has(nodeTheme) && (!anyQuadrantOn || quadrantOn);
+    }
+    return quadrantOn;
+  }
+
+  // ── Bézier helpers (for thread edges) ───────────────────────
   function _bezierCtrl(x1, y1, x2, y2, idx) {
-    const mx = (x1 + x2) / 2;
-    const my = (y1 + y2) / 2;
-    const dx = x2 - x1;
-    const dy = y2 - y1;
-    const len = Math.sqrt(dx * dx + dy * dy) || 1;
-    const px = -dy / len;
-    const py =  dx / len;
-    const sign = (idx % 2 === 0) ? 1 : -1;
-    const offset = len * 0.18 * sign;
-    return { x: mx + px * offset, y: my + py * offset };
+    var mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+    var dx = x2 - x1, dy = y2 - y1;
+    var len = Math.sqrt(dx * dx + dy * dy) || 1;
+    var px = -dy / len, py = dx / len;
+    var sign = (idx % 2 === 0) ? 1 : -1;
+    return { x: mx + px * len * 0.18 * sign, y: my + py * len * 0.18 * sign };
   }
 
   function _curveD(x1, y1, cx, cy, x2, y2) {
-    return `M${x1},${y1} Q${cx},${cy} ${x2},${y2}`;
+    return "M" + x1 + "," + y1 + " Q" + cx + "," + cy + " " + x2 + "," + y2;
   }
 
-
-
-  /* ── Build Graph ──────────────────────────────────────────── */
-  function buildGraph() {
-    // Dynamic: include any modalState section whose items have DATE + domain/source
-    const datasets = Object.keys(modalState).filter(function (k) {
-      var items = modalState[k];
-      return Array.isArray(items) && items.length > 0 && items.some(function (i) { return i.DATE; });
-    });
-    if (datasets.length === 0) { setTimeout(buildGraph, 200); return; }
-
-    const items = [];
-    datasets.forEach(cat => {
-      (modalState[cat] || []).forEach(item => {
-        const theme = getTheme(item);
-        const startMo = parseDateStart(item.DATE);
-        const endMo   = parseDateEnd(item.DATE);
-        if (startMo === null) return;
-
-        const duration = Math.max(3, (endMo || startMo) - startMo);
-
-        let quadrant = VIZ_QUADRANT_MAP[item.ID]
-          || (theme === "robotics" || theme === "games" || theme === "software" ? theme : null)
-          || "software";
-
-        items.push({ item, category: cat, theme, quadrant, absMonth: startMo, endMonth: endMo || startMo, duration });
-      });
-    });
-
-    if (items.length === 0) return;
-
-    const quadrants = { robotics: [], games: [], software: [] };
-    items.forEach(it => {
-      if (quadrants[it.quadrant]) quadrants[it.quadrant].push(it);
-    });
-
-    Object.values(quadrants).forEach(group => {
-      group.sort((a, b) => a.absMonth - b.absMonth);
-    });
-
-    _graphWorld = graphModal.querySelector(".viz-world");
-    _edgeSVG = graphModal.querySelector(".kg-edges");
-    if (!_graphWorld || !_edgeSVG) return;
-
-    _graphWorld.querySelectorAll(".kg-node").forEach(n => n.remove());
-    _edgeSVG.innerHTML = "";
-    _nodes = [];
-
-    const centerSize = 100;
-    const centerNode = document.createElement("div");
-    centerNode.className = "kg-node kg-node-center";
-    centerNode.style.setProperty("--kg-size", centerSize + "px");
-    centerNode.innerHTML = `<div class="kg-node-icon">🐧</div>`;
-    centerNode.style.left = "0px";
-    centerNode.style.top = "0px";
-    centerNode.style.cursor = "pointer";
-    centerNode.addEventListener("click", e => {
-      e.stopPropagation();
-      openModal('biography');
-    });
-    _graphWorld.appendChild(centerNode);
-
-    const globalMin = Math.min(...items.map(it => it.absMonth));
-    const globalMax = Math.max(...items.map(it => it.absMonth));
-    const dateRange = Math.max(1, globalMax - globalMin);
-
-    const MIN_DIST     = 100;
-    const MAX_DIST     = 400;
-    const SPREAD_ANGLE = Math.PI / 2.5;
-
-    const globalMinDur = Math.min(...items.map(it => it.duration));
-    const globalMaxDur = Math.max(...items.map(it => it.duration));
-    const MIN_SIZE = 52;
-    const MAX_SIZE = 120;
-
-    function durationToSize(dur) {
-      if (globalMaxDur <= globalMinDur) return (MIN_SIZE + MAX_SIZE) / 2;
-      const t = (dur - globalMinDur) / (globalMaxDur - globalMinDur);
-      return MIN_SIZE + Math.sqrt(t) * (MAX_SIZE - MIN_SIZE);
-    }
-
-    const allPlaced = [];
-    const CENTER_R = 50;
-    allPlaced.push({ x: 0, y: 0, r: CENTER_R, fixed: true });
-
-    Object.keys(quadrants).forEach(qKey => {
-      const group = quadrants[qKey];
-      if (group.length === 0) return;
-      const dir = quadrantDir[qKey];
-      const baseAngle = Math.atan2(dir.y, dir.x);
-
-      group.forEach((it, idx) => {
-        const t = dateRange > 0 ? (it.absMonth - globalMin) / dateRange : 0.5;
-        const dist = MIN_DIST + t * (MAX_DIST - MIN_DIST);
-
-        let angle;
-        if (group.length === 1) {
-          angle = baseAngle;
-        } else {
-          const at = idx / (group.length - 1);
-          angle = baseAngle + SPREAD_ANGLE * (at - 0.5);
-        }
-
-        const seed1 = Math.sin(idx * 7.3 + baseAngle * 13.7);
-        const seed2 = Math.sin(idx * 11.1 + baseAngle * 5.3);
-        const jitterDist  = dist * (1 + seed1 * 0.06);
-        const jitterAngle = angle + seed2 * 0.06;
-
-        it.x = Math.cos(jitterAngle) * jitterDist;
-        it.y = Math.sin(jitterAngle) * jitterDist;
-        it.dist = dist;
-        it.size = durationToSize(it.duration);
-        it.r = it.size / 2;
-      });
-    });
-
-    const movable = [];
-    Object.values(quadrants).forEach(group => {
-      group.forEach(it => movable.push(it));
-    });
-
-    const PADDING = 2;
-    const ITERATIONS = 60;
-
-    for (let iter = 0; iter < ITERATIONS; iter++) {
-      let anyMoved = false;
-
-      for (let i = 0; i < movable.length; i++) {
-        const a = movable[i];
-
-        const dcx = a.x;
-        const dcy = a.y;
-        const distC = Math.sqrt(dcx * dcx + dcy * dcy) || 0.01;
-        const minDistC = a.r + CENTER_R + PADDING;
-        if (distC < minDistC) {
-          const push = (minDistC - distC) / distC;
-          a.x += dcx * push;
-          a.y += dcy * push;
-          anyMoved = true;
-        }
-
-        for (let j = i + 1; j < movable.length; j++) {
-          const b = movable[j];
-          const dx = b.x - a.x;
-          const dy = b.y - a.y;
-          const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
-          const minDist = a.r + b.r + PADDING;
-
-          if (dist < minDist) {
-            const overlap = (minDist - dist) / 2;
-            const nx = dx / dist;
-            const ny = dy / dist;
-            a.x -= nx * overlap;
-            a.y -= ny * overlap;
-            b.x += nx * overlap;
-            b.y += ny * overlap;
-            anyMoved = true;
-          }
-        }
-      }
-
-      if (!anyMoved) break;
-    }
-
-    movable.forEach(it => {
-      it.dist = Math.sqrt(it.x * it.x + it.y * it.y);
-    });
-
-    Object.keys(quadrants).forEach(qKey => {
-      const group = quadrants[qKey];
-      if (group.length === 0) return;
-
-      group.forEach((it, idx) => {
-        const el = buildNodeElement(it);
-        el.style.left = it.x + "px";
-        el.style.top = it.y + "px";
-        _graphWorld.appendChild(el);
-
-        const wEmoji = VIZ_WHISPER_MAP[it.item.ID];
-        const rawN = (it.item.NAME || "").replace(/<[^>]+>/g, " ").replace(/[ \t]+/g, " ").trim();
-        const emRe = /^([\p{Emoji_Presentation}\p{Extended_Pictographic}\uFE0F\u200D]+(?:\s*[\p{Emoji_Presentation}\p{Extended_Pictographic}\uFE0F\u200D]+)*)\s*/u;
-        const emM = rawN.match(emRe);
-        const emP = emM ? emM[1] : "";
-        const wList = [wEmoji || emP || (VIZ_SHORTNAME_MAP[it.item.ID] || rawN).charAt(0)];
-
-        el.addEventListener("mouseenter", () => {
-          const node = _nodes.find(nd => nd.el === el);
-          if (node) { _hoveredNode = node; updateProximityGlow(); }
-        });
-        el.addEventListener("mouseleave", () => {
-          if (_hoveredNode && _hoveredNode.el === el) { _hoveredNode = null; updateProximityGlow(); }
-        });
-
-        _nodes.push({
-          el,
-          theme: it.theme,
-          quadrant: it.quadrant,
-          item: it.item,
-          category: it.category,
-          absMonth: it.absMonth,
-          endMonth: it.endMonth,
-          dist: it.dist,
-          r: it.r,
-          targetX: it.x,
-          targetY: it.y,
-          whispers: wList,
-          nameLayer: el._nameLayer,
-          whisperLayers: Array.from(el._whisperLayers),
-          activeWhisper: 0,
-          lastWhisperIdx: -1,
-          wasFocused: false,
-        });
-      });
-    });
-
-    _threads = [];
-    const svgNS = "http://www.w3.org/2000/svg";
-
-    let defs = _edgeSVG.querySelector("defs");
-    if (!defs) {
-      defs = document.createElementNS(svgNS, "defs");
-      _edgeSVG.prepend(defs);
-    }
-
-    const overlayThemes = ["work", "education", "projects"];
-    const quadrantKeys  = ["robotics", "games", "software"];
-
-    const glowFilter = document.createElementNS(svgNS, "filter");
-    glowFilter.setAttribute("id", "thread-glow");
-    glowFilter.setAttribute("x", "-50%");
-    glowFilter.setAttribute("y", "-50%");
-    glowFilter.setAttribute("width", "200%");
-    glowFilter.setAttribute("height", "200%");
-    const feBlur = document.createElementNS(svgNS, "feGaussianBlur");
-    feBlur.setAttribute("stdDeviation", "2.5");
-    feBlur.setAttribute("result", "blur");
-    const feMerge = document.createElementNS(svgNS, "feMerge");
-    const feMergeBlur = document.createElementNS(svgNS, "feMergeNode");
-    feMergeBlur.setAttribute("in", "blur");
-    const feMergeOrig = document.createElementNS(svgNS, "feMergeNode");
-    feMergeOrig.setAttribute("in", "SourceGraphic");
-    feMerge.appendChild(feMergeBlur);
-    feMerge.appendChild(feMergeOrig);
-    glowFilter.appendChild(feBlur);
-    glowFilter.appendChild(feMerge);
-    defs.appendChild(glowFilter);
-
-    overlayThemes.forEach(theme => {
-      const cfg = threadConfig[theme];
-      if (!cfg) return;
-      const markerId = `thread-arrow-${theme}`;
-      const marker = document.createElementNS(svgNS, "marker");
-      marker.setAttribute("id", markerId);
-      marker.setAttribute("viewBox", "0 0 10 10");
-      marker.setAttribute("refX", "10");
-      marker.setAttribute("refY", "5");
-      marker.setAttribute("markerWidth", "4");
-      marker.setAttribute("markerHeight", "4");
-      marker.setAttribute("orient", "auto-start-reverse");
-      marker.setAttribute("markerUnits", "userSpaceOnUse");
-      const arrowPath = document.createElementNS(svgNS, "path");
-      arrowPath.setAttribute("d", "M 0 1 L 10 5 L 0 9 z");
-      arrowPath.setAttribute("fill", `rgb(${cfg.color})`);
-      marker.appendChild(arrowPath);
-      defs.appendChild(marker);
-    });
-
-    quadrantKeys.forEach(qKey => {
-      const cfg = themeConfig[qKey];
-      if (!cfg) return;
-      const markerId = `thread-arrow-${qKey}`;
-      const marker = document.createElementNS(svgNS, "marker");
-      marker.setAttribute("id", markerId);
-      marker.setAttribute("viewBox", "0 0 10 10");
-      marker.setAttribute("refX", "10");
-      marker.setAttribute("refY", "5");
-      marker.setAttribute("markerWidth", "4");
-      marker.setAttribute("markerHeight", "4");
-      marker.setAttribute("orient", "auto-start-reverse");
-      marker.setAttribute("markerUnits", "userSpaceOnUse");
-      const arrowPath = document.createElementNS(svgNS, "path");
-      arrowPath.setAttribute("d", "M 0 1 L 10 5 L 0 9 z");
-      arrowPath.setAttribute("fill", `rgb(${cfg.color})`);
-      marker.appendChild(arrowPath);
-      defs.appendChild(marker);
-    });
-
-    const _centerVirtual = {
-      targetX: 0, targetY: 0,
-      _newX: 0,   _newY: 0,
-      r: centerSize / 2,
-      _hidden: false,
-    };
-
-    overlayThemes.forEach(theme => {
-      const cfg = threadConfig[theme];
-      if (!cfg) return;
-
-      quadrantKeys.forEach(quadrant => {
-        const threadNodes = _nodes.filter(n => n.theme === theme && n.quadrant === quadrant);
-        if (threadNodes.length < 1) return;
-
-        threadNodes.sort((a, b) => a.endMonth - b.endMonth);
-
-        const nodesWithCenter = [_centerVirtual, ...threadNodes];
-
-        const segments = [];
-        for (let i = 1; i < nodesWithCenter.length; i++) {
-          const fromNode = nodesWithCenter[i - 1];
-          const toNode   = nodesWithCenter[i];
-
-          let fromX = fromNode.targetX;
-          let fromY = fromNode.targetY;
-          let toX   = toNode.targetX;
-          let toY   = toNode.targetY;
-
-          const dx  = toX - fromX;
-          const dy  = toY - fromY;
-          const len = Math.sqrt(dx * dx + dy * dy);
-          if (len > 0) {
-            const ux = dx / len, uy = dy / len;
-            const fromR = fromNode.r || 30;
-            const toR   = toNode.r || 30;
-            if (len > fromR + toR) {
-              fromX += ux * fromR;
-              fromY += uy * fromR;
-              toX   -= ux * toR;
-              toY   -= uy * toR;
-            }
-          }
-
-          const cp = _bezierCtrl(fromX, fromY, toX, toY, i);
-
-          const path = document.createElementNS(svgNS, "path");
-          path.setAttribute("d", _curveD(fromX, fromY, cp.x, cp.y, toX, toY));
-          path.setAttribute("fill", "none");
-          path.setAttribute("stroke", `rgb(${cfg.color})`);
-          path.setAttribute("stroke-width", "1");
-          path.setAttribute("stroke-linecap", "round");
-          path.setAttribute("filter", "url(#thread-glow)");
-          path.setAttribute("marker-end", `url(#thread-arrow-${theme})`);
-          path.classList.add("kg-thread");
-          path.style.opacity = "0";
-          path.dataset.theme    = theme;
-          path.dataset.quadrant = quadrant;
-
-          path._cx1 = fromX; path._cy1 = fromY;
-          path._ccx = cp.x;  path._ccy = cp.y;
-          path._cx2 = toX;   path._cy2 = toY;
-          _edgeSVG.appendChild(path);
-          segments.push(path);
-        }
-
-        _threads.push({
-          theme,
-          quadrant,
-          segments,
-          nodes: nodesWithCenter,
-        });
-      });
-    });
-
-    const viewport = graphModal.querySelector(".viz-viewport");
-    if (viewport) {
-      requestAnimationFrame(() => {
-        const vw = viewport.clientWidth;
-        const vh = viewport.clientHeight;
-        _transform.x = vw / 2;
-        _transform.y = vh / 2;
-        _transform.scale = 1.4;
-        updateTransform();
-      });
-    }
-
-    _initPanZoom();
-    _createExploreHint();
-
-    // ── Keyboard navigation (a11y) ──────────────────────────
-    initVizKeyboardNav({
-      modal: graphModal,
-      getNodes: function () { return _nodes; },
-      onFocus: function (n) { _hoveredNode = n; updateProximityGlow(); },
-      onActivate: function (n) { openEntry(n.category, n.item.ID); },
-      liveRegionId: "kg-live",
-    });
-
-    graphBuilt = true;
+  // ── Splitter for multi-emoji color values ───────────────────
+  var _colorEmojis = [];
+  if (nodeCfg.source === "sections" && rawData.categories && rawData.categories.color) {
+    _colorEmojis = Object.keys(rawData.categories.color);
+    _colorEmojis.sort(function (a, b) { return b.length - a.length; });
   }
 
-  /* fitTextToCircle & _graphBreakText are now top-level (shared) */
-
-  /** Build a single node DOM element */
-  function buildNodeElement(it) {
-    const { item, category, theme, quadrant } = it;
-    const cfg = category === "games" ? themeConfig.games : theme === "education" ? themeConfig.education : theme === "work" ? themeConfig.work : theme === "projects" ? themeConfig.projects : (themeConfig[quadrant] || themeConfig.software);
-    const size = it.size || 60;
-
-    const rawName = (item.NAME || "")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/[ \t]+/g, " ")
-      .trim();
-    const emojiRe = /^([\p{Emoji_Presentation}\p{Extended_Pictographic}\uFE0F\u200D]+(?:\s*[\p{Emoji_Presentation}\p{Extended_Pictographic}\uFE0F\u200D]+)*)\s*/u;
-    const emojiMatch = rawName.match(emojiRe);
-    const emojiPrefix = emojiMatch ? emojiMatch[1] : "";
-    const textPart = emojiMatch ? rawName.slice(emojiMatch[0].length) : rawName;
-
-    const graphName = VIZ_SHORTNAME_MAP[item.ID] || _graphBreakText(textPart);
-    const wEmoji = VIZ_WHISPER_MAP[item.ID];
-    const whisperFace = wEmoji || emojiPrefix || graphName.charAt(0);
-
-    const el = createNodeEl({
-      size:    size,
-      rgb:     cfg.color,
-      label:   graphName,
-      whisper: whisperFace || graphName,
-      onClick: function () { openEntry(category, item.ID); },
-    });
-
-    el.setAttribute("tabindex", "0");
-    el.setAttribute("role", "img");
-    el.setAttribute("aria-label", rawName);
-    el.dataset.theme = theme;
-    el.dataset.quadrant = quadrant;
-
-    return el;
-  }
-
-  /* ── Entrance animation ───────────────────────────────────── */
-  function animateEntrance() {
-    _nodes.forEach(n => {
-      n.el.style.left = "0px";
-      n.el.style.top = "0px";
-      n.el.style.opacity = "0";
-      n.el.style.transform = "translate(-50%, -50%) scale(0.3)";
-    });
-
-    _threads.forEach(th => {
-      th.segments.forEach(seg => {
-        seg.style.opacity = "0";
-      });
-    });
-
-    const maxDist = Math.max(1, ..._nodes.map(n => n.dist || 100));
-    const MAX_DELAY = 600;
-
-    _nodes.forEach((n, i) => {
-      const distFrac = (n.dist || 100) / maxDist;
-      const delay = distFrac * MAX_DELAY + i * 8;
-      setTimeout(() => {
-        n.el.style.transition = "left 0.6s cubic-bezier(0.34, 1.56, 0.64, 1), top 0.6s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.4s ease, transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1)";
-        n.el.style.left = n.targetX + "px";
-        n.el.style.top = n.targetY + "px";
-        n.el.style.opacity = "";
-        n.el.style.transform = "translate(-50%, -50%) scale(1)";
-
-        setTimeout(() => {
-          n.el.style.transition = "";
-        }, 700);
-      }, delay);
-    });
-
-    const viewport = graphModal.querySelector(".viz-viewport");
-    if (viewport) {
-      requestAnimationFrame(() => {
-        const vw = viewport.clientWidth;
-        const vh = viewport.clientHeight;
-        _transform.x = vw / 2;
-        _transform.y = vh / 2;
-        _transform.scale = 1.4;
-        updateTransform();
-      });
-    }
-
-    const fadeDur = 500;
-    const fadeStart = performance.now() + 250;
-    function fadeThreads(now) {
-      let t = (now - fadeStart) / fadeDur;
-      if (t < 0) t = 0;
-      if (t > 1) t = 1;
-      const opacity = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-      _threads.forEach(th => {
-        th.segments.forEach(seg => {
-          if (!seg.classList.contains("kg-thread-hidden")) {
-            seg.style.opacity = String(opacity);
-          }
-        });
-      });
-      if (t < 1) requestAnimationFrame(fadeThreads);
-    }
-    requestAnimationFrame(fadeThreads);
-    const threadSettleTime = MAX_DELAY + _nodes.length * 8 + 600;
-    setTimeout(() => updateProximityGlow(), threadSettleTime);
-  }
-
-  /* ── Camera fit ───────────────────────────────────────────── */
-  let _cameraHandle = null;
-
-  function fitVisibleNodes(animate) {
-    const viewport = graphModal.querySelector(".viz-viewport");
-    if (!viewport || _nodes.length === 0) return;
-    const visible = _nodes.filter(n => !n._hidden);
-    if (visible.length === 0) return;
-
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    visible.forEach(n => {
-      const r = n.r || 30;
-      if (n.targetX - r < minX) minX = n.targetX - r;
-      if (n.targetX + r > maxX) maxX = n.targetX + r;
-      if (n.targetY - r < minY) minY = n.targetY - r;
-      if (n.targetY + r > maxY) maxY = n.targetY + r;
-    });
-    const cR = 45;
-    if (-cR < minX) minX = -cR;
-    if (cR > maxX)  maxX = cR;
-    if (-cR < minY) minY = -cR;
-    if (cR > maxY)  maxY = cR;
-
-    if (_cameraHandle) { _cameraHandle.cancel(); _cameraHandle = null; }
-
-    _cameraHandle = animateCameraFit(_transform, function () {
-      updateTransform();
-    }, {
-      vpWidth:  viewport.clientWidth,
-      vpHeight: viewport.clientHeight,
-      bounds:   { x: minX, y: minY, w: maxX - minX, h: maxY - minY },
-      minScale: _KG_MIN_SCALE,
-      maxScale: _KG_MAX_SCALE,
-      padding:  50,
-      duration: animate !== false ? 500 : 0,
-      animate:  animate !== false,
-    });
-  }
-
-  /* ── Tour (via shared createTourEngine) ─────────────────── */
-  let _tourShowNames = false;
-
-  const TOUR_DEFAULT = '<strong>Traverse</strong><span class="scroll-arrow">\uD83D\uDD2D</span>';
-
-  const TOUR_STEPS = [
-    { filters: ["software", "education"],  label: "💻🎓" },
-    { filters: ["software", "work"],       label: "💻💼" },
-    { filters: ["software", "projects"],   label: "💻🚀" },
-    { filters: ["robotics", "education"],  label: "🤖🎓" },
-    { filters: ["robotics", "work"],       label: "🤖💼" },
-    { filters: ["robotics", "projects"],   label: "🤖🚀" },
-    { filters: ["games", "education"],     label: "🎮🎓" },
-    { filters: ["games", "work"],          label: "🎮💼" },
-    { filters: ["games", "projects"],      label: "🎮🚀" },
-  ];
-
-  var _kgTour = createTourEngine({
-    modal:     graphModal,
-    viewport:  graphModal.querySelector(".viz-viewport"),
-    hintLabel: TOUR_DEFAULT,
-    steps:     TOUR_STEPS,
-    applyStep: function (step) {
-      allThemes.forEach(function (t) { activeFilters.delete(t); });
-      step.filters.forEach(function (f) { activeFilters.add(f); });
-      _filterSys.syncUI();
-      applyFilter();
-    },
-    resetAll: function () {
-      allThemes.forEach(function (t) { activeFilters.add(t); });
-      _filterSys.syncUI();
-      applyFilter();
-    },
-    fitCamera: function () { fitVisibleNodes(true); },
-    setShowNames: function (show) {
-      _tourShowNames = show;
-      var vp = graphModal.querySelector(".viz-viewport");
-      if (vp) vp.classList.toggle("kg-tour-show-names", !!show);
-      updateProximityGlow();
-    },
-    updateGlow: function () { updateProximityGlow(); },
-    glowPills: function () {
-      graphModal.querySelectorAll(".viz-filter-glow").forEach(function (el) {
-        el.classList.remove("viz-filter-glow");
-      });
-      activeFilters.forEach(function (f) {
-        var pill = graphModal.querySelector('.viz-filter[data-filter="' + f + '"]');
-        if (pill) {
-          void pill.offsetWidth;
-          pill.classList.add("viz-filter-glow");
-        }
-      });
-    },
-    clearPillGlow: function () {
-      graphModal.querySelectorAll(".viz-filter-glow").forEach(function (el) { el.classList.remove("viz-filter-glow"); });
-    },
-  });
-
-  function _createExploreHint() {
-    _kgTour.createHint();
-  }
-
-  const _origClose = closeKnowledgeModal;
-  window.closeKnowledgeModal = function () {
-    if (_kgTour.isTouring()) _kgTour.stop();
-    _origClose();
-  };
-
-  themeBtns.forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      if (_kgTour.isTouring()) _kgTour.stop();
-    });
-  });
-  if (allBtn) {
-    allBtn.addEventListener("click", function () {
-      if (_kgTour.isTouring()) _kgTour.stop();
-    });
-  }
-})();
-
-
-// ═══════════════════════════════════════════════════════════════
-//  MTG CARD TREE — Consumer of createSkillTree()
-//
-//  Cards organised into N "drants" (one per card type), each
-//  fanning outward from a type-hub at an evenly-spaced angle.
-//  Sized by CMC, filtered by card type & mana color.
-//  Click a node → card-view modal overlay with full art.
-// ═══════════════════════════════════════════════════════════════
-(() => {
-  const modal = document.getElementById("mtg-tree-modal");
-  if (!modal) return;
-
-  /* ── Category config — populated from PORTFOLIO.json cards.categories ── */
-  var MTG_COLORS   = null;
-  var TYPE_ICONS   = null;
-  var TYPE_COLORS  = null;
-  var DECK_CFG     = null;
-  var ALL_COLORS   = [];
-  var ALL_TYPES    = [];
-  var ALL_DECKS    = [];
-  var DRANT_DIR    = {};
-  var _COLOR_EMOJIS = [];
-  var _mtgShell    = null;
-  var closeBtn     = null;
-  var filterAxes   = [];
-  var _mtgLayoutToggle = null;
-  var _shellReady  = false;
-
-  /* ── Shell builder (called once from ensureData) ─────────── */
-  function _initShell(categories) {
-    if (_shellReady) return;
-    var typeCat  = categories.type  || {};
-    var colorCat = categories.color || {};
-    var deckCat  = categories.deck  || {};
-
-    /* Resolve accent index → RGB from SETTINGS.json accents */
-    function _resolveColor(entry) {
-      if (entry.accent != null) return VIZ_resolveAccent(entry.accent);
-      return entry.color || '160,160,160';
-    }
-
-    /* Populate type maps from data */
-    TYPE_COLORS = {};
-    TYPE_ICONS  = {};
-    Object.keys(typeCat).forEach(function (k) {
-      TYPE_COLORS[k] = _resolveColor(typeCat[k]);
-      TYPE_ICONS[k]  = typeCat[k].icon || k;
-    });
-    ALL_TYPES = Object.keys(TYPE_COLORS);
-
-    /* Populate color maps from data */
-    MTG_COLORS = {};
-    Object.keys(colorCat).forEach(function (k) {
-      MTG_COLORS[k] = { rgb: _resolveColor(colorCat[k]), icon: colorCat[k].icon || k };
-    });
-    ALL_COLORS = Object.keys(MTG_COLORS);
-
-    /* Populate deck config from data (angle computed from count) */
-    DECK_CFG = {};
-    var deckKeys = Object.keys(deckCat);
-    deckKeys.forEach(function (d, i) {
-      DECK_CFG[d] = {
-        label: deckCat[d].label || d,
-        icon:  deckCat[d].icon  || "🃏",
-        angle: (2 * Math.PI * i / deckKeys.length) - Math.PI / 2,
-        color: _resolveColor(deckCat[d]),
-      };
-    });
-    ALL_DECKS = Object.keys(DECK_CFG);
-
-    /* Drant directions — one per type, evenly around circle */
-    ALL_TYPES.forEach(function (type, i) {
-      var angle = (2 * Math.PI * i / ALL_TYPES.length) - Math.PI / 2;
-      DRANT_DIR[type] = {
-        angle: angle,
-        x:     Math.cos(angle),
-        y:     Math.sin(angle),
-        color: TYPE_COLORS[type] || "160,160,160",
-        icon:  TYPE_ICONS[type]  || "?",
-      };
-    });
-
-    /* Color-emoji set for splitter */
-    _COLOR_EMOJIS = Object.keys(MTG_COLORS);
-    _COLOR_EMOJIS.sort(function (a, b) { return b.length - a.length; });
-
-    /* Build viz shell filter items from data */
-    var _mtgTypeItems = [
-      { value: "all", tc: "255,255,255", tcLight: "30,30,30", allIndicator: "⬜", emoji: "", active: true }
-    ];
-    ALL_TYPES.forEach(function (t) {
-      _mtgTypeItems.push({ value: t, tc: TYPE_COLORS[t], dot: TYPE_COLORS[t], emoji: TYPE_ICONS[t], active: true });
-    });
-
-    var _mtgDeckItems = [
-      { value: "all", tc: "255,255,255", tcLight: "30,30,30", allIndicator: "⬜", emoji: "🃏", active: true }
-    ];
-    ALL_DECKS.forEach(function (d) {
-      var dc = DECK_CFG[d];
-      _mtgDeckItems.push({ value: d, tc: dc.color, dot: dc.color, emoji: dc.icon, active: true });
-    });
-
-    var _mtgColorItems = [
-      { value: "all", tc: "255,255,255", tcLight: "30,30,30", allIndicator: "⬜", emoji: "🎨", active: true }
-    ];
-    ALL_COLORS.forEach(function (c) {
-      var mc = MTG_COLORS[c];
-      _mtgColorItems.push({ value: c, tc: mc.rgb, dot: mc.rgb, emoji: mc.icon, active: true });
-    });
-
-    _mtgShell = buildVizShell(modal, {
-      cardClass:  "kg-modal-card",
-      closeId:    "mtgTreeModalClose",
-      toggleId:   "mtgLayoutToggle",
-      svgClass:   "kg-edges",
-      filterGroups: [
-        { btnClass: "viz-filter", dataAttr: "type",  items: _mtgTypeItems },
-        { btnClass: "viz-filter", dataAttr: "deck",  items: _mtgDeckItems,  separator: true },
-        { btnClass: "viz-filter", dataAttr: "color", items: _mtgColorItems, separator: true },
-      ],
-    });
-
-    closeBtn = _mtgShell.closeBtn;
-
-    /* Wire filter axes from shell-built buttons */
-    var typeBtns    = modal.querySelectorAll(".viz-filter[data-type]");
-    var colorBtns   = modal.querySelectorAll(".viz-filter[data-color]");
-    var deckBtns    = modal.querySelectorAll(".viz-filter[data-deck]");
-    var typeAllBtn  = modal.querySelector('.viz-filter[data-type="all"]');
-    var colorAllBtn = modal.querySelector('.viz-filter[data-color="all"]');
-    var deckAllBtn  = modal.querySelector('.viz-filter[data-deck="all"]');
-
-    filterAxes.length = 0;
-    filterAxes.push(
-      { key: "type",  allValues: ALL_TYPES,  allBtn: typeAllBtn,  itemBtns: Array.from(typeBtns).filter(function (b) { return b.dataset.type !== "all"; }) },
-      { key: "color", allValues: ALL_COLORS, allBtn: colorAllBtn, itemBtns: Array.from(colorBtns).filter(function (b) { return b.dataset.color !== "all"; }) },
-      { key: "deck",  allValues: ALL_DECKS,  allBtn: deckAllBtn,  itemBtns: Array.from(deckBtns).filter(function (b) { return b.dataset.deck !== "all"; }) }
-    );
-
-    /* Layout toggle — shell button now exists */
-    _mtgLayoutToggle = createLayoutToggle({
-      btn: "mtgLayoutToggle",
-      onDynamic: function () { if (_tree) relayoutMtg(); },
-    });
-
-    /* Stop tour on manual filter click */
-    modal.querySelectorAll(".viz-filter").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        if (_mtgTour && _mtgTour.isTouring()) _mtgTour.stop();
-      });
-    });
-
-    _shellReady = true;
-  }
-
-  /* ── Color-emoji splitter (colors can be multi-emoji) ──── */
-  // _COLOR_EMOJIS populated by _initShell from PORTFOLIO.json cards.categories
-
-  function splitColorEmojis(str) {
+  function _splitColorEmojis(str) {
     var result = [];
     var rem = str;
     while (rem.length) {
       var matched = false;
-      for (var i = 0; i < _COLOR_EMOJIS.length; i++) {
-        if (rem.indexOf(_COLOR_EMOJIS[i]) === 0) {
-          result.push(_COLOR_EMOJIS[i]);
-          rem = rem.slice(_COLOR_EMOJIS[i].length);
+      for (var i = 0; i < _colorEmojis.length; i++) {
+        if (rem.indexOf(_colorEmojis[i]) === 0) {
+          result.push(_colorEmojis[i]);
+          rem = rem.slice(_colorEmojis[i].length);
           matched = true;
           break;
         }
@@ -1972,191 +1039,633 @@ function createSkillTree(cfg) {
     return result;
   }
 
-  /**
-   * Normalize a CARDS item (UPPERCASE keys, emoji values)
-   * into the lowercase-key shape the rest of the code expects.
-   * TYPE is always a single emoji. COLOR may be multi-emoji.
-   */
-  function normalizeCard(item) {
-    var id     = item.ID || "";
-    var type   = item.TYPE  || "🧛";
-    var colors = splitColorEmojis(item.COLOR || "💎");
-    if (colors.length === 0) colors = ["💎"];
+  // ── buildNodes callback for createSkillTree ─────────────────
+  var _hubRefs = {};
+  var _localThreads = [];
+  var _centerVirtual = null;
 
-    var card = {
-      cardName:  item.NAME     || "",
-      whisper:   item.WHISPER  || "",
-      category:  item.CATEGORY || "",
-      salt:      item.SALT     || 0,
-      color:     colors.length === 1 ? colors[0] : colors,
-      cmc:       item.CMC      || 0,
-      rarity:    item.RARITY   || "",
-      types:     type,
-      price:     item.PRICE    || 0,
-      art:       "png/card_art/" + id + "/art.png",
-    };
-    if (item.SECONDARY_CATEGORIES) {
-      card.secondaryCategories = item.SECONDARY_CATEGORIES;
+  function _buildNodes(graphWorld, svgNS, helpers) {
+    var nodes = [], hubs = [], centerVirts = [];
+    _localThreads = [];
+    _hubRefs = {};
+
+    var collected = _collectItems();
+    if (collected.length === 0) return { nodes: nodes, hubs: hubs, centerVirts: centerVirts };
+
+    // ── Center node ─────────────────────────────────────────
+    var CENTER_R = 0;
+    if (centerCfg) {
+      CENTER_R = centerCfg.size / 2;
+      var cEl = document.createElement("div");
+      cEl.className = "kg-node kg-node-center";
+      cEl.style.setProperty("--kg-size", centerCfg.size + "px");
+      cEl.innerHTML = '<div class="kg-node-icon">' + (centerCfg.icon || "⭐") + '</div>';
+      cEl.style.left = "0px"; cEl.style.top = "0px"; cEl.style.cursor = "pointer";
+      cEl.addEventListener("click", function (e) {
+        e.stopPropagation();
+        if (centerCfg.action) openModal(centerCfg.action);
+      });
+      graphWorld.appendChild(cEl);
+      _centerVirtual = { targetX: 0, targetY: 0, _newX: 0, _newY: 0, r: CENTER_R, _hidden: false };
+      centerVirts.push(_centerVirtual);
     }
-    return card;
-  }
 
-  /* ── Helpers ────────────────────────────────────────────── */
+    // ── Hub nodes (for "hub" edge mode) ─────────────────────
+    if (edgeCfg.connect === "hub" && nodeCfg.hubField) {
+      var hubGap  = nodeCfg.hubGap || 75;
+      var hubSize = nodeCfg.hubSize || 120;
+      // Discover unique hub IDs from data
+      var hubIds = [];
+      collected.forEach(function (c) {
+        var hid = c._section ? c._section.id : (c.item[nodeCfg.hubField] || "");
+        if (hid && hubIds.indexOf(hid) === -1) hubIds.push(hid);
+      });
 
-  function cmcToRGB(cmc) {
-    var c = cmc || 0;
-    if (c <= 1) return VIZ_resolveAccent(0);    // accent 0 (blue)
-    if (c <= 3) return VIZ_resolveAccent(3);    // accent 3 (green)
-    if (c <= 5) return VIZ_resolveAccent(1);    // accent 1 (yellow)
-    return VIZ_resolveAccent(2);                // accent 2 (red)
-  }
+      // Resolve hub metadata from categories
+      var deckCatKey = "";
+      filterDefs.forEach(function (fd) {
+        if (fd.dataAttr === "deck" || fd.key === nodeCfg.hubField) deckCatKey = fd.key;
+      });
+      var deckCat = {};
+      if (rawData.categories && rawData.categories[deckCatKey]) deckCat = rawData.categories[deckCatKey];
+      else if (rawData.categories && rawData.categories.deck) deckCat = rawData.categories.deck;
 
-  function saltToSize(salt) {
-    var MIN = 30, MAX = 80;
-    var s = Math.max(0, Math.min(3, salt || 0));
-    return MIN + (s / 3) * (MAX - MIN);
-  }
-
-  /* ── Card-view modal (overlay on top of skill tree) ───── */
-  // ── MTG card shell (replaces MTG-CARD-MODAL.HTML fragment) ──
-  (function() {
-    var el = document.getElementById("mtg-card-modal");
-    if (el) el.innerHTML =
-      '<div class="glass-tile modal-card kg-detail-card">' +
-        '<div class="modal-sticky-bar"><div class="modal-sticky-group tl-glow">' +
-          '<div class="kg-badges" id="mtg-card-badges"></div>' +
-          '<button class="modal-close" id="mtgCardModalClose" aria-label="Close modal">&times;</button>' +
-        '</div></div>' +
-        '<img class="kg-detail-art" id="mtg-card-view-art" src="" alt="" />' +
-      '</div>';
-  })();
-  var cardModal    = document.getElementById("mtg-card-modal");
-  var cardModalImg = document.getElementById("mtg-card-view-art");
-  var cardBadges   = document.getElementById("mtg-card-badges");
-  var _cardReg     = registerModal("mtg-card-modal");
-
-  function openCardModal(card) {
-    if (!cardModal) return;
-
-    var badges = "";
-
-    // Type badge (color-coded to match skill tree)
-    var t   = card.types || "🧛";
-    var rgb = TYPE_COLORS[t] || "160,160,160";
-    badges += '<span class="kg-badge" style="--bc:' + rgb + '">' + t + '</span>';
-
-    // Mana color badges (color-coded to match skill tree)
-    var colors = Array.isArray(card.color) ? card.color : [card.color || "💎"];
-    colors.forEach(function (c) {
-      var entry = MTG_COLORS[c];
-      if (!entry) return;
-      badges += '<span class="kg-badge" style="--bc:' + entry.rgb + '">' + entry.icon + '</span>';
-    });
-
-    // Salt tier badge
-    var salt = card.salt || 0;
-    var saltIcon, saltTitle, saltRGB;
-    if (salt < 0.15)      { saltIcon = "🧊"; saltTitle = "Zero salt";  saltRGB = _a(0); }
-    else if (salt < 0.40) { saltIcon = "🌿"; saltTitle = "Mild";       saltRGB = _a(3); }
-    else if (salt < 0.80) { saltIcon = "🌶️"; saltTitle = "Spicy";      saltRGB = _a(1); }
-    else if (salt < 1.20) { saltIcon = "🔥"; saltTitle = "Hot";        saltRGB = _a(2); }
-    else                  { saltIcon = "☠️"; saltTitle = "Toxic";      saltRGB = _a(2); }
-    badges += '<span class="kg-badge" style="--bc:' + saltRGB + '" title="Salt ' + salt.toFixed(2) + ' — ' + saltTitle + '">' + saltIcon + '</span>';
-
-    // Price tier badge
-    var price = card.price || 0;
-    var priceIcon, priceTitle, priceRGB;
-    if (price < 1)        { priceIcon = "🪙"; priceTitle = "Penny";   priceRGB = "160,160,160"; }
-    else if (price < 5)   { priceIcon = "💵"; priceTitle = "Budget";  priceRGB = _a(3); }
-    else if (price < 15)  { priceIcon = "💰"; priceTitle = "Mid";     priceRGB = _a(1); }
-    else if (price < 50)  { priceIcon = "💎"; priceTitle = "Premium"; priceRGB = _a(0); }
-    else if (price < 100) { priceIcon = "👑"; priceTitle = "Baller";  priceRGB = _a(1); }
-    else                  { priceIcon = "🏦"; priceTitle = "Vault";   priceRGB = _a(0); }
-    badges += '<span class="kg-badge" style="--bc:' + priceRGB + '" title="$' + price.toFixed(2) + ' — ' + priceTitle + '">' + priceIcon + '</span>';
-
-    cardBadges.innerHTML = badges;
-
-    // Full card art
-    cardModalImg.src = card.art || "";
-    cardModalImg.alt = card.cardName || "";
-    cardModalImg.style.display = card.art ? "" : "none";
-
-    _cardReg.open();
-  }
-
-  function closeCardModal() {
-    _cardReg.close();
-  }
-
-  /* ── Data fetch (from CARDS.json via shared loader) ──────── */
-  var _cardsData = null;
-
-  function ensureData(cb) {
-    if (_cardsData) { cb(_cardsData); return; }
-    loadCardsJSON()
-      .then(function (raw) {
-        if (!raw) throw new Error("CARDS.json returned null");
-        _initShell(raw.categories || {});
-        // Normalize CARDS uppercase-emoji format → lowercase-string format
-        var data = { sections: [] };
-        (raw.sections || []).forEach(function (sec) {
-          data.sections.push({
-            id:    sec.id,
-            count: sec.count,
-            items: sec.items.map(normalizeCard),
-          });
+      // Commander cards (if commanderCategory is set)
+      var cmdCat = nodeCfg.commanderCategory;
+      var cmdCards = {};
+      if (cmdCat) {
+        collected.forEach(function (c) {
+          var cat = c.item[nodeCfg.fieldMap && nodeCfg.fieldMap.category ? nodeCfg.fieldMap.category : "CATEGORY"] || c.item.category || "";
+          if (cat === cmdCat) cmdCards[c._section ? c._section.id : ""] = c;
         });
-        _cardsData = data;
-        cb(data);
-      })
-      .catch(function (err) { console.error("[mtg-tree] fetch error", err); });
-  }
+      }
 
-  function relayoutMtg() {
-    if (!_tree) return;
-    var nodes = _tree.getNodes();
-    var visible = nodes.filter(function (n) { return !n._hidden; });
-    if (visible.length === 0) return;
+      hubIds.forEach(function (hid, i) {
+        var angle = (2 * Math.PI * i / hubIds.length) - Math.PI / 2;
+        var hx = Math.cos(angle) * hubGap;
+        var hy = Math.sin(angle) * hubGap;
+        var meta = deckCat[hid] || {};
+        var color = meta.accent != null ? VIZ_resolveAccent(meta.accent) : (meta.color || "160,160,160");
+        var icon  = meta.icon || hid.charAt(0).toUpperCase();
+        var label = meta.label || hid;
 
-    // Group visible nodes by drant (card type)
-    var drants = {};
-    ALL_TYPES.forEach(function (t) { drants[t] = []; });
-    visible.forEach(function (n) {
-      if (n.drant && drants[n.drant]) drants[n.drant].push(n);
+        var hubEl = document.createElement("div");
+        hubEl.className = "kg-node kg-hub";
+        hubEl.style.setProperty("--kg-size", hubSize + "px");
+        hubEl.style.setProperty("--tc", color);
+        hubEl.style.left = hx + "px"; hubEl.style.top = hy + "px";
+        hubEl.innerHTML = '<div class="kg-node-icon">' + icon + '</div>' +
+          '<div class="kg-node-name"><span class="kg-name-layer kg-name-show" style="font-size:9px">' + label + '</span></div>';
+
+        // Commander click
+        var cmd = cmdCards[hid];
+        if (cmd) {
+          hubEl.style.cursor = "pointer";
+          hubEl.addEventListener("click", function (e) { e.stopPropagation(); _handleClick(cmd); });
+        }
+
+        graphWorld.appendChild(hubEl);
+        var hubRef = { el: hubEl, targetX: hx, targetY: hy, r: hubSize / 2, _hidden: false, _fixed: true, _deckId: hid, children: [] };
+        hubs.push(hubRef);
+        _hubRefs[hid] = hubRef;
+      });
+
+      CENTER_R = Math.max(CENTER_R, hubSize / 2 + hubGap);
+      if (_centerVirtual) _centerVirtual.r = CENTER_R;
+    }
+
+    // ── Compute sizing values ─────────────────────────────────
+    if (SIZE_FIELD === "duration") {
+      collected.forEach(function (c) { c._sizeVal = _computeDuration(c.item); });
+    } else if (SIZE_FIELD) {
+      collected.forEach(function (c) { c._sizeVal = c.item[SIZE_FIELD] || 0; });
+    } else {
+      collected.forEach(function (c) { c._sizeVal = 1; });
+    }
+    var sb = _sizeBounds(collected);
+    collected.forEach(function (c) {
+      c._size = _computeSize(c._sizeVal, sb.min, sb.max);
+      c._r = c._size / 2;
     });
 
-    var MIN_DIST   = 55;
-    var MAX_DIST   = 400;
-    var SPREAD     = 2 * Math.PI / ALL_TYPES.length * 0.75;
-    var CENTER_R   = 90;
-    var PADDING    = 3;
-    var ITERATIONS = 50;
+    // ── Group by sector, compute initial positions ────────────
+    var groups = {};
+    sectorKeys.forEach(function (k) { groups[k] = []; });
+    collected.forEach(function (c) {
+      if (!groups[c.sector]) groups[c.sector] = [];
+      groups[c.sector].push(c);
+    });
 
-    var movable = [];
-    Object.keys(drants).forEach(function (type) {
-      var group = drants[type];
-      if (group.length === 0) return;
-      var dir = DRANT_DIR[type];
-      var baseAngle = dir.angle;
+    // Sort within each group
+    Object.keys(groups).forEach(function (gk) {
+      groups[gk].sort(function (a, b) {
+        var da = a.item.DATE ? VIZ_parseDateStart(a.item.DATE) : null;
+        var db = b.item.DATE ? VIZ_parseDateStart(b.item.DATE) : null;
+        if (da != null && db != null) return da - db;
+        return (b._sizeVal || 0) - (a._sizeVal || 0);
+      });
+    });
 
-      // Sort by price descending for relayout
-      group.sort(function (a, b) { return (b._price || 0) - (a._price || 0); });
+    var MIN_DIST  = layCfg.minDist || 80;
+    var MAX_DIST  = layCfg.maxDist || 400;
+    var SPREAD    = 2 * Math.PI / Math.max(1, sectorKeys.length) * (layCfg.spreadFactor || 0.6);
 
-      group.forEach(function (n, idx) {
-        var price = n._price || 0;
-        var norm = price > 0 ? Math.min(1, Math.pow(price / 550, 0.3)) : 0;
-        var dist = MIN_DIST + (1 - norm) * (MAX_DIST - MIN_DIST);
+    sectorKeys.forEach(function (sk) {
+      var group = groups[sk] || [];
+      if (!group.length) return;
+      var dir = sectorDir[sk];
+      var baseAngle = dir ? dir.angle : 0;
+
+      group.forEach(function (c, idx) {
+        var t = sb.max > sb.min ? (c._sizeVal - sb.min) / (sb.max - sb.min) : 0.5;
+        if (SIZE_XFORM === "sqrt") t = Math.sqrt(t);
+        var dist = MIN_DIST + t * (MAX_DIST - MIN_DIST);
         var angle;
-        if (group.length === 1) {
-          angle = baseAngle;
-        } else {
+        if (group.length === 1) { angle = baseAngle; }
+        else {
           var frac = idx / (group.length - 1);
           angle = baseAngle + SPREAD * (frac - 0.5);
         }
-        var seed1 = Math.sin(idx * 7.3 + baseAngle * 13.7);
-        var seed2 = Math.sin(idx * 11.1 + baseAngle * 5.3);
-        dist *= (1 + seed1 * 0.06);
-        angle += seed2 * 0.06;
+        var s1 = Math.sin(idx * 7.3 + baseAngle * 13.7);
+        var s2 = Math.sin(idx * 11.1 + baseAngle * 5.3);
+        dist *= (1 + s1 * 0.06);
+        angle += s2 * 0.06;
+
+        c._x = Math.cos(angle) * dist;
+        c._y = Math.sin(angle) * dist;
+      });
+    });
+
+    // ── Skip commanders in hub mode (they live on hub nodes) ──
+    var cmdCat2 = nodeCfg.commanderCategory;
+    var fmCat   = nodeCfg.fieldMap && nodeCfg.fieldMap.category ? nodeCfg.fieldMap.category : "CATEGORY";
+
+    // ── Deduplicate (for sections source, a card may appear in multiple sections) ──
+    var deduped = [];
+    if (nodeCfg.source === "sections") {
+      var seen = {};
+      collected.forEach(function (c) {
+        // Skip commander cards — they appear on hubs
+        var catVal = c.item[fmCat] || c.item.category || "";
+        if (cmdCat2 && catVal === cmdCat2) return;
+        var cardKey = c.item[nodeCfg.fieldMap && nodeCfg.fieldMap.cardName ? nodeCfg.fieldMap.cardName : "NAME"] || c.item.ID;
+        if (!seen[cardKey]) {
+          seen[cardKey] = { c: c, decks: new Set() };
+        }
+        seen[cardKey].decks.add(c.sectionId);
+      });
+      Object.keys(seen).forEach(function (k) {
+        var entry = seen[k];
+        entry.c._deckSet = entry.decks;
+        deduped.push(entry.c);
+      });
+    } else {
+      deduped = collected;
+    }
+
+    // ── Create DOM nodes ──────────────────────────────────────
+    deduped.forEach(function (c) {
+      var rgb = _resolveColor(c.item, c.sector);
+      var lbl = _resolveLabel(c.item);
+      var wsp = _resolveWhisper(c.item);
+
+      var el = createNodeEl({
+        size:    c._size,
+        rgb:     rgb,
+        label:   lbl,
+        whisper: wsp,
+        fitRatio: nodeCfg.source === "sections" ? 0.45 : 0.50,
+        onClick: function () { _handleClick(c); },
+      });
+
+      el.style.left = c._x + "px";
+      el.style.top  = c._y + "px";
+      el.setAttribute("tabindex", "0");
+      el.setAttribute("role", "img");
+      el.setAttribute("aria-label", (c.item[nodeCfg.labelFallback || "NAME"] || "").replace(/<[^>]+>/g, "").trim());
+
+      graphWorld.appendChild(el);
+
+      // Build filterKeys for multi-axis intersection
+      var filterKeys = {};
+      filterDefs.forEach(function (fDef) {
+        var attr = fDef.dataAttr || fDef.key;
+        if (fDef.mode === "grouped") {
+          // Domain-based: VIZ maps
+          var src = VIZ_SOURCE_MAP[c.item.ID] || VIZ_DOMAIN_MAP[c.item.ID] || c.sector;
+          filterKeys[attr] = new Set([src]);
+        } else if (attr === "deck" && c._deckSet) {
+          filterKeys[attr] = c._deckSet;
+        } else if (attr === "color" && nodeCfg.fieldMap && nodeCfg.fieldMap.color) {
+          // Multi-emoji color splitting
+          var rawColor = c.item[nodeCfg.fieldMap.color] || "";
+          var colors = _colorEmojis.length ? _splitColorEmojis(rawColor) : [rawColor];
+          if (colors.length === 0) colors = [rawColor || ""];
+          filterKeys[attr] = new Set(colors);
+        } else {
+          var rawVal = c.item[fDef.key.toUpperCase()] || c.item[fDef.key] || c.sector;
+          var arrVal = Array.isArray(rawVal) ? rawVal : [rawVal];
+          filterKeys[attr] = new Set(arrVal);
+        }
+      });
+
+      var wList = [wsp];
+      var nodeRef = {
+        el: el,
+        targetX: c._x, targetY: c._y,
+        r: c._r,
+        _hidden: false,
+        filterKeys: filterKeys,
+        _entry: c,
+        _sector: c.sector,
+        _theme: VIZ_SOURCE_MAP[c.item.ID] || VIZ_DOMAIN_MAP[c.item.ID] || c.sector,
+        _price: c.item.PRICE || c.item.price || 0,
+        drant: c.sector,
+        absMonth: c.item.DATE ? VIZ_parseDateStart(c.item.DATE) : 0,
+        endMonth: c.item.DATE ? VIZ_parseDateEnd(c.item.DATE) : 0,
+        dist: Math.sqrt(c._x * c._x + c._y * c._y),
+        whispers: wList,
+        nameLayer: el._nameLayer,
+        whisperLayers: Array.from(el._whisperLayers),
+        activeWhisper: 0, lastWhisperIdx: -1, wasFocused: false,
+      };
+
+      helpers.registerHover(el, nodeRef);
+
+      // Hub edges
+      if (edgeCfg.connect === "hub" && nodeCfg.hubField) {
+        var deckIds = c._deckSet || new Set([c.sectionId]);
+        deckIds.forEach(function (did) {
+          var hub = _hubRefs[did];
+          if (hub) {
+            helpers.addEdge(hub, nodeRef, rgb, 0.7);
+            hub.children.push(nodeRef);
+          }
+        });
+      }
+
+      nodes.push(nodeRef);
+    });
+
+    // ── Thread edges (for "thread" mode — bézier by overlay×sector) ──
+    if (edgeCfg.connect === "thread" && overlayKeys.length) {
+      var defs = graphWorld.closest(".modal-overlay").querySelector("." + (shellCfg.svgClass || "kg-edges") + " defs");
+      if (!defs) {
+        var svgEl = graphWorld.closest(".modal-overlay").querySelector("." + (shellCfg.svgClass || "kg-edges"));
+        defs = document.createElementNS(svgNS, "defs");
+        if (svgEl) svgEl.prepend(defs);
+      }
+
+      // Glow filter
+      var glowF = document.createElementNS(svgNS, "filter");
+      glowF.setAttribute("id", "thread-glow");
+      glowF.setAttribute("x", "-50%"); glowF.setAttribute("y", "-50%");
+      glowF.setAttribute("width", "200%"); glowF.setAttribute("height", "200%");
+      var feB = document.createElementNS(svgNS, "feGaussianBlur");
+      feB.setAttribute("stdDeviation", "2.5"); feB.setAttribute("result", "blur");
+      var feM = document.createElementNS(svgNS, "feMerge");
+      var mn1 = document.createElementNS(svgNS, "feMergeNode"); mn1.setAttribute("in", "blur");
+      var mn2 = document.createElementNS(svgNS, "feMergeNode"); mn2.setAttribute("in", "SourceGraphic");
+      feM.appendChild(mn1); feM.appendChild(mn2);
+      glowF.appendChild(feB); glowF.appendChild(feM);
+      if (defs) defs.appendChild(glowF);
+
+      // Arrow markers per theme
+      overlayKeys.concat(sectorKeys).forEach(function (themeKey) {
+        var src = VIZ_THEMES[themeKey];
+        if (!src) return;
+        var marker = document.createElementNS(svgNS, "marker");
+        marker.setAttribute("id", "thread-arrow-" + themeKey);
+        marker.setAttribute("viewBox", "0 0 10 10");
+        marker.setAttribute("refX", "10"); marker.setAttribute("refY", "5");
+        marker.setAttribute("markerWidth", "4"); marker.setAttribute("markerHeight", "4");
+        marker.setAttribute("orient", "auto-start-reverse");
+        marker.setAttribute("markerUnits", "userSpaceOnUse");
+        var arrowPath = document.createElementNS(svgNS, "path");
+        arrowPath.setAttribute("d", "M 0 1 L 10 5 L 0 9 z");
+        arrowPath.setAttribute("fill", "rgb(" + src.color + ")");
+        marker.appendChild(arrowPath);
+        if (defs) defs.appendChild(marker);
+      });
+
+      // Build threads: one per overlay-theme × quadrant
+      var edgeSVG = graphWorld.closest(".modal-overlay").querySelector("." + (shellCfg.svgClass || "kg-edges"));
+
+      overlayKeys.forEach(function (theme) {
+        var src = VIZ_THEMES[theme];
+        if (!src) return;
+
+        sectorKeys.forEach(function (qKey) {
+          var threadNodes = nodes.filter(function (n) {
+            return n._theme === theme && n._sector === qKey;
+          });
+          if (threadNodes.length < 1) return;
+
+          threadNodes.sort(function (a, b) { return (a.endMonth || 0) - (b.endMonth || 0); });
+
+          var chain = _centerVirtual ? [_centerVirtual].concat(threadNodes) : threadNodes;
+          var segments = [];
+          for (var si = 1; si < chain.length; si++) {
+            var from = chain[si - 1], to = chain[si];
+            var fx = from.targetX, fy = from.targetY, tx = to.targetX, ty = to.targetY;
+            var dx = tx - fx, dy = ty - fy, len = Math.sqrt(dx * dx + dy * dy);
+            if (len > 0) {
+              var ux = dx / len, uy = dy / len;
+              var fR = from.r || 30, tR = to.r || 30;
+              if (len > fR + tR) { fx += ux * fR; fy += uy * fR; tx -= ux * tR; ty -= uy * tR; }
+            }
+
+            var cp = _bezierCtrl(fx, fy, tx, ty, si);
+            var path = document.createElementNS(svgNS, "path");
+            path.setAttribute("d", _curveD(fx, fy, cp.x, cp.y, tx, ty));
+            path.setAttribute("fill", "none");
+            path.setAttribute("stroke", "rgb(" + src.color + ")");
+            path.setAttribute("stroke-width", "1");
+            path.setAttribute("stroke-linecap", "round");
+            path.setAttribute("filter", "url(#thread-glow)");
+            if (edgeCfg.markers) path.setAttribute("marker-end", "url(#thread-arrow-" + theme + ")");
+            path.classList.add("kg-thread");
+            path.style.opacity = "0";
+            path.dataset.theme = theme;
+            path.dataset.quadrant = qKey;
+            path._cx1 = fx; path._cy1 = fy;
+            path._ccx = cp.x; path._ccy = cp.y;
+            path._cx2 = tx; path._cy2 = ty;
+            if (edgeSVG) edgeSVG.appendChild(path);
+            segments.push(path);
+          }
+          _localThreads.push({ theme: theme, quadrant: qKey, segments: segments, nodes: chain });
+        });
+      });
+    }
+
+    return { nodes: nodes, hubs: hubs, centerVirts: centerVirts, threads: [] };
+  }
+
+  // ── createSkillTree with all schema-derived config ──────────
+  var _tree = null;
+  var _tour = null;
+  var _layoutToggle = null;
+
+  function _initTree() {
+    if (_tree) return;
+
+    _tree = createSkillTree({
+      modal:            modal,
+      closeBtn:         closeBtn,
+      edgeSvgSelector:  "." + (shellCfg.svgClass || "kg-edges"),
+      filterAxes:       _filterAxes,
+      buildNodes:       _buildNodes,
+      isNodeVisible:    _isGrouped ? _groupedVisible : null,
+      initialScale:     camCfg.initialScale || 1,
+      minScale:         camCfg.minScale || 0.3,
+      maxScale:         camCfg.maxScale || 4,
+      collisionPadding: colCfg.padding || 2,
+      collisionIters:   colCfg.iterations || 60,
+      isTouring:        function () { return _tour && _tour.isTouring(); },
+      onClose:          function () {
+        if (_cardReg) _cardReg.close();
+        if (_tour && _tour.isTouring()) _tour.stop();
+      },
+      onFilterApplied:  function () {
+        // Thread visibility for grouped mode
+        if (edgeCfg.connect === "thread" && _localThreads.length) {
+          var fs = _tree.getFilterSets();
+          var fKey = _filterAxes[0] ? _filterAxes[0].key : "filter";
+          var active = fs[fKey];
+          var activeOverlays = overlayKeys.filter(function (f) { return active && active.has(f); });
+          var singleOverlay = activeOverlays.length === 1;
+
+          _localThreads.forEach(function (th) {
+            var themeOn    = active && active.has(th.theme);
+            var quadrantOn = active && active.has(th.quadrant);
+            var visible = themeOn && quadrantOn;
+            th.segments.forEach(function (seg) {
+              seg.classList.toggle("kg-thread-hidden", !visible);
+              seg.style.opacity = visible ? "1" : "";
+              if (visible && edgeCfg.dynamicColor) {
+                var useQuadrantColor = singleOverlay;
+                var tc = VIZ_THEMES[useQuadrantColor ? th.quadrant : th.theme];
+                if (tc) {
+                  seg.setAttribute("stroke", "rgb(" + tc.color + ")");
+                  seg.setAttribute("marker-end", "url(#thread-arrow-" + (useQuadrantColor ? th.quadrant : th.theme) + ")");
+                }
+              }
+            });
+          });
+        }
+
+        // Relayout if dynamic layout toggle
+        if (_layoutToggle && !_layoutToggle.isStatic()) {
+          _relayoutDynamic();
+        }
+
+        // Camera fit
+        if (!_tour || !_tour.isTouring()) {
+          var settleDelay = (_layoutToggle && !_layoutToggle.isStatic()) ? 700 : 80;
+          setTimeout(function () { _fitVisibleNodes(true); }, settleDelay);
+        }
+      },
+    });
+
+    if (!_tree) return;
+
+    // ── Layout toggle ─────────────────────────────────────────
+    _layoutToggle = createLayoutToggle({
+      btn: shellCfg.toggleId || "vizLayoutToggle",
+      onDynamic: function () { if (_tree) _relayoutDynamic(); },
+    });
+
+    // ── Keyboard nav ──────────────────────────────────────────
+    initVizKeyboardNav({
+      modal: modal,
+      getNodes: function () { return _tree.getNodes(); },
+      onFocus: function (n) { _tree.updateGlow(); },
+      onActivate: function (n) { _handleClick(n._entry); },
+      liveRegionId: (shellCfg.accessibility && shellCfg.accessibility.liveRegionId) || null,
+    });
+
+    // ── Tour ──────────────────────────────────────────────────
+    if (tourCfg.steps && tourCfg.steps.length) {
+      _tour = createTourEngine({
+        modal:     modal,
+        viewport:  modal.querySelector(".viz-viewport"),
+        hintLabel: tourCfg.hintLabel || '<strong>Traverse</strong><span class="scroll-arrow">\uD83D\uDD2D</span>',
+        steps:     tourCfg.steps,
+        stepDelay: tourCfg.stepDelay || 2000,
+        applyStep: function (step) {
+          if (!_tree) return;
+          var fs = _tree.getFilterSets();
+          if (step.filters && !step.filters.deck) {
+            // Simple array of filter keys (KG-style)
+            var fKey = _filterAxes[0] ? _filterAxes[0].key : "filter";
+            var active = fs[fKey];
+            if (active) {
+              var allVals = _filterAxes[0] ? _filterAxes[0].allValues : [];
+              allVals.forEach(function (v) { active.delete(v); });
+              (Array.isArray(step.filters) ? step.filters : []).forEach(function (f) { active.add(f); });
+            }
+          } else if (step.filters) {
+            // Multi-axis filters (MTG-style)
+            _filterAxes.forEach(function (ax) {
+              var vals = step.filters[ax.key];
+              fs[ax.key].clear();
+              if (vals) {
+                vals.forEach(function (v) { fs[ax.key].add(v); });
+              } else {
+                ax.allValues.forEach(function (v) { fs[ax.key].add(v); });
+              }
+            });
+          }
+          _tree.syncFilterUI();
+          _tree.applyFilters();
+        },
+        resetAll: function () {
+          if (_tree) _tree.resetFilters();
+        },
+        fitCamera: function () { _fitVisibleNodes(true); },
+        setShowNames: function (show) {
+          var vp = modal.querySelector(".viz-viewport");
+          if (vp) vp.classList.toggle("kg-tour-show-names", !!show);
+          if (_tree) _tree.updateGlow();
+        },
+        updateGlow: function () { if (_tree) _tree.updateGlow(); },
+        glowPills: function () {
+          modal.querySelectorAll(".viz-filter-glow").forEach(function (el) { el.classList.remove("viz-filter-glow"); });
+          var fs = _tree.getFilterSets();
+          _filterAxes.forEach(function (ax) {
+            if (fs[ax.key].size < ax.allValues.length) {
+              fs[ax.key].forEach(function (v) {
+                var pill = modal.querySelector('.viz-filter[data-' + ax.key + '="' + v + '"]');
+                if (pill) { void pill.offsetWidth; pill.classList.add("viz-filter-glow"); }
+              });
+            }
+          });
+        },
+        clearPillGlow: function () {
+          modal.querySelectorAll(".viz-filter-glow").forEach(function (el) { el.classList.remove("viz-filter-glow"); });
+        },
+      });
+
+      _tour.createHint();
+    } else if (!tourCfg.steps && filterDefs.length > 1) {
+      // Auto-generate tour steps for multi-axis vizzes (one per deck, one per type)
+      var autoSteps = [];
+      _filterAxes.forEach(function (ax) {
+        ax.allValues.forEach(function (v) {
+          var step = { label: v, filters: {} };
+          step.filters[ax.key] = [v];
+          autoSteps.push(step);
+        });
+      });
+      if (autoSteps.length) {
+        _tour = createTourEngine({
+          modal: modal,
+          viewport: modal.querySelector(".viz-viewport"),
+          hintLabel: tourCfg.hintLabel || '<strong>Traverse</strong><span class="scroll-arrow">\uD83D\uDD2D</span>',
+          steps: autoSteps,
+          stepDelay: tourCfg.stepDelay || 2000,
+          applyStep: function (step) {
+            if (!_tree) return;
+            var fs = _tree.getFilterSets();
+            _filterAxes.forEach(function (ax) {
+              var vals = step.filters[ax.key];
+              fs[ax.key].clear();
+              if (vals) { vals.forEach(function (v) { fs[ax.key].add(v); }); }
+              else { ax.allValues.forEach(function (v) { fs[ax.key].add(v); }); }
+            });
+            _tree.syncFilterUI();
+            _tree.applyFilters();
+          },
+          resetAll: function () { if (_tree) _tree.resetFilters(); },
+          fitCamera: function () { _fitVisibleNodes(true); },
+          setShowNames: function (show) {
+            var vp = modal.querySelector(".viz-viewport");
+            if (vp) vp.classList.toggle("kg-tour-show-names", !!show);
+            if (_tree) _tree.updateGlow();
+          },
+          updateGlow: function () { if (_tree) _tree.updateGlow(); },
+          glowPills: function () {
+            modal.querySelectorAll(".viz-filter-glow").forEach(function (el) { el.classList.remove("viz-filter-glow"); });
+            var fs = _tree.getFilterSets();
+            _filterAxes.forEach(function (ax) {
+              if (fs[ax.key].size < ax.allValues.length) {
+                fs[ax.key].forEach(function (v) {
+                  var pill = modal.querySelector('.viz-filter[data-' + ax.key + '="' + v + '"]');
+                  if (pill) { void pill.offsetWidth; pill.classList.add("viz-filter-glow"); }
+                });
+              }
+            });
+          },
+          clearPillGlow: function () {
+            modal.querySelectorAll(".viz-filter-glow").forEach(function (el) { el.classList.remove("viz-filter-glow"); });
+          },
+        });
+        _tour.createHint();
+      }
+    }
+
+    // Stop tour on manual filter clicks
+    modal.querySelectorAll(".viz-filter").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (_tour && _tour.isTouring()) _tour.stop();
+      });
+    });
+  }
+
+  // ── Dynamic relayout (recalculate positions for visible nodes) ──
+  function _relayoutDynamic() {
+    if (!_tree) return;
+    var allNodes = _tree.getNodes();
+    var visible = allNodes.filter(function (n) { return !n._hidden; });
+    if (visible.length === 0) return;
+
+    var groups = {};
+    sectorKeys.forEach(function (k) { groups[k] = []; });
+    visible.forEach(function (n) {
+      var sk = n._sector || n.drant;
+      if (groups[sk]) groups[sk].push(n);
+    });
+
+    var MIN_DIST  = layCfg.minDist || 80;
+    var MAX_DIST  = layCfg.maxDist || 400;
+    var SPREAD    = 2 * Math.PI / Math.max(1, sectorKeys.length) * (layCfg.spreadFactor || 0.6);
+    var CENTER_R2 = _centerVirtual ? _centerVirtual.r : 50;
+    var PADDING2  = colCfg.padding || 2;
+    var ITERS2    = colCfg.iterations || 60;
+
+    var movable = [];
+    Object.keys(groups).forEach(function (sk) {
+      var group = groups[sk];
+      if (!group.length) return;
+      var dir = sectorDir[sk];
+      var baseAngle = dir ? dir.angle : 0;
+
+      group.sort(function (a, b) { return (a.absMonth || 0) - (b.absMonth || 0); });
+
+      group.forEach(function (n, idx) {
+        var t = 0.5;
+        if (SIZE_FIELD === "duration" && n._entry) {
+          var allM = visible.map(function (v) { return v.absMonth || 0; });
+          var gMin = Math.min.apply(null, allM), gMax = Math.max.apply(null, allM);
+          var range = Math.max(1, gMax - gMin);
+          t = range > 0 ? ((n.absMonth || 0) - gMin) / range : 0.5;
+        } else {
+          t = n._price > 0 ? Math.min(1, Math.pow(n._price / 550, 0.3)) : 0;
+          t = 1 - t; // invert: expensive → close
+        }
+        if (SIZE_XFORM === "sqrt") t = Math.sqrt(t);
+        var dist = MIN_DIST + t * (MAX_DIST - MIN_DIST);
+        var angle;
+        if (group.length === 1) { angle = baseAngle; }
+        else {
+          var frac = idx / (group.length - 1);
+          angle = baseAngle + SPREAD * (frac - 0.5);
+        }
+        var s1 = Math.sin(idx * 7.3 + baseAngle * 13.7);
+        var s2 = Math.sin(idx * 11.1 + baseAngle * 5.3);
+        dist *= (1 + s1 * 0.06);
+        angle += s2 * 0.06;
 
         n._newX = Math.cos(angle) * dist;
         n._newY = Math.sin(angle) * dist;
@@ -2164,16 +1673,16 @@ function createSkillTree(cfg) {
       });
     });
 
-    // Collision resolution
-    for (var iter = 0; iter < ITERATIONS; iter++) {
+    // Collision
+    for (var iter = 0; iter < ITERS2; iter++) {
       var anyMoved = false;
       for (var i = 0; i < movable.length; i++) {
         var a = movable[i];
         var dcx = a._newX, dcy = a._newY;
         var distC = Math.sqrt(dcx * dcx + dcy * dcy) || 0.01;
-        var minDistC = a.r + CENTER_R + PADDING;
-        if (distC < minDistC) {
-          var push = (minDistC - distC) / distC;
+        var minDC = a.r + CENTER_R2 + PADDING2;
+        if (distC < minDC) {
+          var push = (minDC - distC) / distC;
           a._newX += dcx * push; a._newY += dcy * push;
           anyMoved = true;
         }
@@ -2181,7 +1690,7 @@ function createSkillTree(cfg) {
           var b = movable[j];
           var dx = b._newX - a._newX, dy = b._newY - a._newY;
           var d = Math.sqrt(dx * dx + dy * dy) || 0.01;
-          var minD = a.r + b.r + PADDING;
+          var minD = a.r + b.r + PADDING2;
           if (d < minD) {
             var ov = (minD - d) / 2;
             var nx = dx / d, ny = dy / d;
@@ -2200,204 +1709,68 @@ function createSkillTree(cfg) {
     });
 
     _tree.animateToPositions(600);
-  }
 
-  /* ── Create the tree instance ───────────────────────────── */
-  var _tree = null;
+    // Animate threads to new positions
+    if (edgeCfg.connect === "thread" && _localThreads.length) {
+      var fs = _tree.getFilterSets();
+      var fKey = _filterAxes[0] ? _filterAxes[0].key : "filter";
+      var active = fs[fKey];
 
-  function buildMtgNodes(graphWorld, svgNS, helpers) {
-    var nodes = [], hubs = [], centerVirts = [];
+      _localThreads.forEach(function (th) {
+        var themeOn    = active && active.has(th.theme);
+        var quadrantOn = active && active.has(th.quadrant);
+        if (!themeOn || !quadrantOn) return;
 
-    var data = _cardsData;
-    if (!data || !data.sections) return { nodes: nodes, hubs: hubs, centerVirts: centerVirts };
+        th.segments.forEach(function (seg, si) {
+          var fromNode = th.nodes[si];
+          var toNode   = th.nodes[si + 1];
+          if (!fromNode || !toNode || fromNode._hidden || toNode._hidden) return;
 
-    /* ── Build deck hubs (commanders at center) ───────────── */
-    var hubSize = 180;
-    var hubGap  = 75;
-    var hubRefs = {};
-
-    var commanderCards = {};  // deckId → commander card data
-
-    data.sections.forEach(function (section) {
-      var deckId = section.id;
-      var dcfg   = DECK_CFG[deckId];
-      if (!dcfg) return;
-
-      // Find commander card for this deck
-      var cmdr = null;
-      (section.items || []).forEach(function (card) {
-        if (card.category === "Commander") cmdr = card;
-      });
-      if (cmdr) commanderCards[deckId] = cmdr;
-
-      var hubX = Math.cos(dcfg.angle) * hubGap;
-      var hubY = Math.sin(dcfg.angle) * hubGap;
-
-      var hubEl = document.createElement("div");
-      hubEl.className = "kg-node kg-hub";
-      hubEl.style.setProperty("--kg-size", hubSize + "px");
-      hubEl.style.setProperty("--tc", dcfg.color);
-      hubEl.style.left = hubX + "px";
-      hubEl.style.top  = hubY + "px";
-      hubEl.innerHTML = '<div class="kg-node-icon">' + dcfg.icon + '</div>' +
-        '<div class="kg-node-name"><span class="kg-name-layer kg-name-show" style="font-size:9px">' + dcfg.label + '</span></div>';
-
-      // Click hub → open commander card modal
-      if (cmdr) {
-        hubEl.style.cursor = "pointer";
-        hubEl.addEventListener("click", function (e) {
-          e.stopPropagation();
-          openCardModal(cmdr);
-        });
-      }
-
-      graphWorld.appendChild(hubEl);
-
-      var hubRef = { el: hubEl, targetX: hubX, targetY: hubY, r: hubSize / 2, _hidden: false, _fixed: true, _deckId: deckId, children: [] };
-      hubs.push(hubRef);
-      hubRefs[deckId] = hubRef;
-    });
-
-    /* ── Deduplicate cards & track deck membership ─────────── */
-    var cardMap = {};  // cardName → { card, decks: Set }
-    data.sections.forEach(function (section) {
-      var deckId = section.id;
-      (section.items || []).forEach(function (card) {
-        if (card.category === "Commander") return;  // commanders live on hub nodes
-        var key = card.cardName;
-        if (!cardMap[key]) cardMap[key] = { card: card, decks: new Set() };
-        cardMap[key].decks.add(deckId);
-      });
-    });
-
-    /* ── Group cards by type (drant) for spatial layout ────── */
-    var drants = {};
-    ALL_TYPES.forEach(function (t) { drants[t] = []; });
-    Object.keys(cardMap).forEach(function (k) {
-      var entry = cardMap[k];
-      var type = entry.card.types || "🧛";
-      if (!drants[type]) drants[type] = [];
-      entry._primaryType = type;            // cache for node creation
-      drants[type].push(entry);
-    });
-
-    /* ── Layout constants ─────────────────────────────────── */
-    var MIN_DIST = 55;
-    var MAX_DIST = 400;
-    var SPREAD   = 2 * Math.PI / ALL_TYPES.length * 0.75;
-
-    /* ── Helper: create a card node ───────────────────────── */
-    function makeCardNode(card, cx, cy, deckIds) {
-      var size = saltToSize(card.salt);
-      var rgb  = cmcToRGB(card.cmc);
-
-      // First grapheme of cardName is the main emoji → use as whisper
-      var nameChars = Array.from(card.cardName);
-      var firstChar = nameChars[0] || "";
-      var restName  = nameChars.slice(1).join("").trim();
-      var displayName = restName.replace(/\s+/g, "<br>") || card.cardName.replace(/\s+/g, "<br>");
-      var whisperContent = firstChar || card.types || displayName;
-
-      var el = createNodeEl({
-        size:     size,
-        rgb:      rgb,
-        label:    displayName,
-        whisper:  whisperContent,
-        fitRatio: 0.45,
-        onClick:  function () { openCardModal(card); },
-      });
-
-      el.style.left = cx + "px";
-      el.style.top  = cy + "px";
-      graphWorld.appendChild(el);
-
-      var typeArr = [card.types || "🧛"];
-      var colorArr = Array.isArray(card.color) ? card.color : [card.color || "💎"];
-      var nodeRef = {
-        el: el,
-        targetX: cx,
-        targetY: cy,
-        r: size / 2,
-        _hidden: false,
-        _cmc: card.cmc || 0,
-        _salt: card.salt || 0,
-        _price: card.price || 0,
-        drant: typeArr[0],
-        filterKeys: {
-          type:  new Set(typeArr),
-          color: new Set(colorArr),
-          deck:  new Set(deckIds),
-        },
-      };
-
-      helpers.registerHover(el, nodeRef);
-      return nodeRef;
-    }
-
-    /* ── Place cards in drant fans, edges to deck hubs ─────── */
-    ALL_TYPES.forEach(function (type) {
-      var group = drants[type];
-      if (!group || group.length === 0) return;
-      var dir = DRANT_DIR[type];
-      var baseAngle = dir.angle;
-
-      group.sort(function (a, b) {
-        return (b.card.price || 0) - (a.card.price || 0);  // most expensive first (closest)
-      });
-
-      group.forEach(function (entry, idx) {
-        var card = entry.card;
-        // Distance from center: expensive cards close, cheap cards far
-        var price = card.price || 0;
-        // pow(0.3) compresses range — bunches cards closer to center
-        var norm = price > 0 ? Math.min(1, Math.pow(price / 550, 0.3)) : 0;
-        // Invert: high price → small dist (close to center)
-        var dist = MIN_DIST + (1 - norm) * (MAX_DIST - MIN_DIST);
-        var angle;
-        if (group.length === 1) {
-          angle = baseAngle;
-        } else {
-          var frac = idx / (group.length - 1);
-          angle = baseAngle + SPREAD * (frac - 0.5);
-        }
-
-        var seed1 = Math.sin(idx * 7.3 + baseAngle * 13.7);
-        var seed2 = Math.sin(idx * 11.1 + baseAngle * 5.3);
-        dist *= (1 + seed1 * 0.06);
-        angle += seed2 * 0.06;
-
-        var cx = Math.cos(angle) * dist;
-        var cy = Math.sin(angle) * dist;
-
-        var nodeRef = makeCardNode(card, cx, cy, entry.decks);
-        var edgeRGB = cmcToRGB(card.cmc);
-
-        // Edge to each deck hub this card belongs to
-        entry.decks.forEach(function (deckId) {
-          var hub = hubRefs[deckId];
-          if (hub) {
-            helpers.addEdge(hub, nodeRef, edgeRGB, 0.7);
-            hub.children.push(nodeRef);
+          var nx1 = fromNode._newX || fromNode.targetX;
+          var ny1 = fromNode._newY || fromNode.targetY;
+          var nx2 = toNode._newX || toNode.targetX;
+          var ny2 = toNode._newY || toNode.targetY;
+          var dx2 = nx2 - nx1, dy2 = ny2 - ny1, len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+          if (len2 > 0) {
+            var ux2 = dx2 / len2, uy2 = dy2 / len2;
+            var fR2 = fromNode.r || 30, tR2 = toNode.r || 30;
+            if (len2 > fR2 + tR2) { nx1 += ux2 * fR2; ny1 += uy2 * fR2; nx2 -= ux2 * tR2; ny2 -= uy2 * tR2; }
           }
+          var ncp = _bezierCtrl(nx1, ny1, nx2, ny2, si);
+          var ox1 = seg._cx1 || 0, oy1 = seg._cy1 || 0;
+          var ocx = seg._ccx || 0, ocy = seg._ccy || 0;
+          var ox2 = seg._cx2 || 0, oy2 = seg._cy2 || 0;
+
+          var dur = 550, start = performance.now() + 50;
+          function animSeg(now) {
+            var t = Math.min(1, (now - start) / dur);
+            if (t < 0) t = 0;
+            var ease = t < 1 ? 1 - Math.pow(1 - t, 3) * (1 + 2.5 * (1 - t) * Math.sin(t * Math.PI)) : 1;
+            seg.setAttribute("d", _curveD(
+              ox1 + (nx1 - ox1) * ease, oy1 + (ny1 - oy1) * ease,
+              ocx + (ncp.x - ocx) * ease, ocy + (ncp.y - ocy) * ease,
+              ox2 + (nx2 - ox2) * ease, oy2 + (ny2 - oy2) * ease
+            ));
+            if (t < 1) requestAnimationFrame(animSeg);
+          }
+          requestAnimationFrame(animSeg);
+          seg._cx1 = nx1; seg._cy1 = ny1;
+          seg._ccx = ncp.x; seg._ccy = ncp.y;
+          seg._cx2 = nx2; seg._cy2 = ny2;
         });
-
-        nodes.push(nodeRef);
       });
-    });
-
-    return { nodes: nodes, hubs: hubs, centerVirts: centerVirts };
+    }
   }
 
-  /* ── Camera fit for MTG ──────────────────────────────────── */
-  var _mtgCameraHandle = null;
+  // ── Camera fit ──────────────────────────────────────────────
+  var _cameraHandle = null;
 
-  function fitMtgVisibleNodes(animate) {
+  function _fitVisibleNodes(animate) {
     if (!_tree) return;
     var viewport = modal.querySelector(".viz-viewport");
     if (!viewport) return;
-    var nodes = _tree.getNodes();
-    var hubs  = _tree.getHubs();
-    var visible = nodes.filter(function (n) { return !n._hidden; });
+    var allNodes = _tree.getNodes();
+    var visible = allNodes.filter(function (n) { return !n._hidden; });
     if (visible.length === 0) return;
 
     var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -2409,145 +1782,51 @@ function createSkillTree(cfg) {
       if (n.targetY + r > maxY) maxY = n.targetY + r;
     });
 
-    if (_mtgCameraHandle) { _mtgCameraHandle.cancel(); _mtgCameraHandle = null; }
+    // Include center in bounds
+    var cR = _centerVirtual ? _centerVirtual.r : 0;
+    if (cR) {
+      if (-cR < minX) minX = -cR;
+      if (cR > maxX)  maxX = cR;
+      if (-cR < minY) minY = -cR;
+      if (cR > maxY)  maxY = cR;
+    }
+
+    if (_cameraHandle) { _cameraHandle.cancel(); _cameraHandle = null; }
 
     var transform = _tree.getTransform();
-    _mtgCameraHandle = animateCameraFit(transform, function () {
+    _cameraHandle = animateCameraFit(transform, function () {
       _tree.updateTransform();
     }, {
       vpWidth:  viewport.clientWidth,
       vpHeight: viewport.clientHeight,
       bounds:   { x: minX, y: minY, w: maxX - minX, h: maxY - minY },
-      minScale: 0.3,
-      maxScale: 4,
+      minScale: camCfg.minScale || 0.3,
+      maxScale: camCfg.maxScale || 4,
       padding:  50,
       duration: animate !== false ? 500 : 0,
       animate:  animate !== false,
     });
   }
 
-  /* ── Tour (via shared createTourEngine) ────────────────── */
-  var _mtgTour = null;   // created lazily after _tree exists
-
-  var MTG_TOUR_LABEL = '<strong>Traverse</strong><span class="scroll-arrow">\uD83D\uDD2D</span>';
-
-  function _buildMtgTourSteps() {
-    var steps = [];
-    ALL_DECKS.forEach(function (d) {
-      steps.push({ label: DECK_CFG[d].icon, filters: { deck: [d], type: null, color: null } });
+  // ── Boot ────────────────────────────────────────────────────
+  // For "sections" source, data may need async loading
+  if (nodeCfg.source === "sections") {
+    var srcFile = key.replace(/Modal$/, "").toUpperCase();
+    loadDataSource(srcFile).then(function () {
+      _initTree();
     });
-    ALL_TYPES.forEach(function (t) {
-      steps.push({ label: TYPE_ICONS[t] || t, filters: { deck: null, type: [t], color: null } });
-    });
-    return steps;
+  } else {
+    _initTree();
   }
 
-  function _createMtgTour() {
-    _mtgTour = createTourEngine({
-      modal:     modal,
-      viewport:  modal.querySelector(".viz-viewport"),
-      hintLabel: MTG_TOUR_LABEL,
-      steps:     _buildMtgTourSteps(),
-      stepDelay: 2000,
-      applyStep: function (step, idx) {
-        if (!_tree) return;
-        var fs = _tree.getFilterSets();
-        // For each axis: if step specifies values use them, else set to all
-        ["type", "color", "deck"].forEach(function (axis) {
-          var vals = step.filters[axis];
-          var allVals = axis === "type" ? ALL_TYPES : axis === "color" ? ALL_COLORS : ALL_DECKS;
-          fs[axis].clear();
-          if (vals) {
-            vals.forEach(function (v) { fs[axis].add(v); });
-          } else {
-            allVals.forEach(function (v) { fs[axis].add(v); });
-          }
-        });
-        _tree.syncFilterUI();
-        _tree.applyFilters();
-      },
-      resetAll: function () {
-        if (!_tree) return;
-        _tree.resetFilters();
-      },
-      fitCamera: function () { fitMtgVisibleNodes(true); },
-      setShowNames: function (show) {
-        var vp = modal.querySelector(".viz-viewport");
-        if (vp) vp.classList.toggle("kg-tour-show-names", !!show);
-        if (_tree) _tree.updateGlow();
-      },
-      updateGlow: function () { if (_tree) _tree.updateGlow(); },
-      glowPills: function () {
-        if (!_tree) return;
-        var fs = _tree.getFilterSets();
-        modal.querySelectorAll(".viz-filter-glow").forEach(function (el) {
-          el.classList.remove("viz-filter-glow");
-        });
-        // Glow active filter buttons across all axes
-        ["type", "color", "deck"].forEach(function (axis) {
-          var allVals = axis === "type" ? ALL_TYPES : axis === "color" ? ALL_COLORS : ALL_DECKS;
-          // Only glow if not all-active (i.e. axis is narrowed)
-          if (fs[axis].size < allVals.length) {
-            fs[axis].forEach(function (v) {
-              var pill = modal.querySelector('.viz-filter[data-' + axis + '="' + v + '"]');
-              if (pill) {
-                void pill.offsetWidth;
-                pill.classList.add("viz-filter-glow");
-              }
-            });
-          }
-        });
-      },
-      clearPillGlow: function () {
-        modal.querySelectorAll(".viz-filter-glow").forEach(function (el) { el.classList.remove("viz-filter-glow"); });
-      },
-    });
-
-    _mtgTour.createHint();
-  }
-
-  function initMtgTree() {
-    ensureData(function () {
-      _tree = createSkillTree({
-        modal:           modal,
-        closeBtn:        closeBtn,
-        edgeSvgSelector: ".kg-edges",
-        filterAxes:      filterAxes,
-        buildNodes:      buildMtgNodes,
-        isNodeVisible:   null,  // use default (multi-axis intersection)
-        initialScale:    0.85,
-        minScale:        0.3,
-        maxScale:        4,
-        collisionPadding: 3,
-        collisionIters:   50,
-        isTouring:       function () { return _mtgTour && _mtgTour.isTouring(); },
-        onClose:         function () {
-          closeCardModal();
-          if (_mtgTour && _mtgTour.isTouring()) _mtgTour.stop();
-        },
-        onFilterApplied: function () {
-          if (!_mtgLayoutToggle.isStatic()) relayoutMtg();
-          // Smooth-ease camera to fit visible nodes
-          if (!_mtgTour || !_mtgTour.isTouring()) {
-            var settleDelay = _mtgLayoutToggle.isStatic() ? 80 : 700;
-            setTimeout(function () { fitMtgVisibleNodes(true); }, settleDelay);
-          }
-        },
-      });
-
-      _createMtgTour();
-      _tree.open();
-    });
-  }
-
-  /* ── Global opener (wired from badge onclick) ───────────── */
-  window.openMtgTreeModal = function () {
-    if (_tree) {
-      if (_mtgTour && _mtgTour.isTouring()) _mtgTour.stop();
-      _tree.open();
-    } else {
-      initMtgTree();
+  return {
+    el: modal,
+    open: function () {
+      if (_tree) _tree.open();
+      else _initTree();
+    },
+    close: function () {
+      if (_tree) _tree.close();
     }
   };
-
-})();
+}

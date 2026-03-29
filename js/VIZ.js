@@ -2,7 +2,7 @@
 //  VIZ.JS — Shared visualization utilities
 //
 //  Extracts common pan/zoom, filter-toggle, and theme-config
-//  logic used by MERMAID.JS, SKILLTREE.JS, TIMELINE.JS, and MAP.JS.
+//  logic used by MERMAID.JS, SKILLTREE.JS, and TIMELINE.JS.
 //  Each consumer calls the factory functions with its own options.
 //
 //  Shared date parsing:
@@ -33,7 +33,7 @@ function VIZ_resolveAccent(idx) {
 // ── Thematic config (loaded from SETTINGS.json → visualization.domains) ──
 // Maps domain key → { color (RGB string), icon (FA class), label, emoji }
 // Populated from __SETTINGS before scripts load (see index.html bootstrap).
-// SKILLTREE.JS, TIMELINE.JS, MAP.JS all consume this shared config.
+// SKILLTREE.JS and TIMELINE.JS all consume this shared config.
 // Accent indices are resolved here so all downstream consumers get .color strings.
 var VIZ_THEMES = (function () {
   var raw = (window.__SETTINGS && window.__SETTINGS.visualization && window.__SETTINGS.visualization.domains) || {};
@@ -50,32 +50,39 @@ var VIZ_THEMES = (function () {
   return out;
 })();
 
-// ── Item → category mappings ─────────────────────────────────
+// ── Item metadata (unified) ──────────────────────────────────
 //
-// Two classification axes exist:
+// VIZ_ITEM_META[id] = { domain, source, quadrant, whisper, shortName }
 //
-//  1. DOMAIN — what discipline an item belongs to (used by TIMELINE.JS)
-//     Categories: robotics, games, software, research, education
+// Backward-compat proxy maps (VIZ_DOMAIN_MAP, VIZ_SOURCE_MAP, etc.)
+// delegate into VIZ_ITEM_META so there's a single storage object.
 //
-//  2. SOURCE — where the item originated (used by SKILLTREE.JS)
-//     Categories: work, education, projects
-//
-//  3. QUADRANT — spatial direction on the knowledge graph
-//     Categories: robotics, games, software
-//     (Only needed when quadrant ≠ domain, e.g. education items
-//      that lean toward robotics or games.)
-//
-// These maps are populated at runtime from PORTFOLIO.json
-// by data.js. Items without an entry default to "software".
+// These maps are populated at runtime from PORTFOLIO.json by DATA.js.
+// Items without an entry default to "software".
 
 const VIZ_IS_MOBILE = window.matchMedia("(max-width: 768px)").matches;
 const VIZ_MIN_SCALE = 0.3;
 const VIZ_MAX_SCALE = 4;
-const VIZ_DOMAIN_MAP = {};
-const VIZ_SOURCE_MAP = {};
-const VIZ_QUADRANT_MAP = {};
-const VIZ_WHISPER_MAP = {};      // skilltree whisper emoji per item
-const VIZ_SHORTNAME_MAP = {};    // skilltree circle label overrides
+
+// ── Unified item metadata map (keyed by item ID) ────────────
+// Populated at runtime from PORTFOLIO.json by DATA.js.
+// Fields: { domain, source, quadrant, whisper, shortName, timeline:{} }
+const VIZ_ITEM_META = {};
+
+// Backward-compat accessors — consumers read these directly.
+// All delegate into VIZ_ITEM_META so there's one source of truth.
+function _vizProxy(field) {
+  return new Proxy(VIZ_ITEM_META, {
+    get: function(t, k) { if (typeof k !== 'string') return undefined; return t[k] && t[k][field]; },
+    set: function(t, k, v) { if (typeof k !== 'string') return true; (t[k] = t[k] || {})[field] = v; return true; },
+    has: function(t, k) { return typeof k === 'string' && t[k] != null && t[k][field] != null; }
+  });
+}
+const VIZ_DOMAIN_MAP    = _vizProxy('domain');
+const VIZ_SOURCE_MAP    = _vizProxy('source');
+const VIZ_QUADRANT_MAP  = _vizProxy('quadrant');
+const VIZ_WHISPER_MAP   = _vizProxy('whisper');
+const VIZ_SHORTNAME_MAP = _vizProxy('shortName');
 const VIZ_TIMELINE = {           // timeline whispers, name/title overrides
   whispers: {},
   nameOverrides: {},
@@ -1031,5 +1038,123 @@ function boostTouchScroll(el, multiplier) {
     el.removeEventListener("touchmove", onTouchMove);
     el.removeEventListener("touchend", onTouchEnd);
     el.removeEventListener("touchcancel", onTouchEnd);
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  MODAL OVERLAY FACTORY — ensures a .modal-overlay div exists
+//
+//  Used by viz engines (SKILLTREE, TIMELINE, MERMAID) and by
+//  MODALS.JS construct system. Lives here (order 3) so it's
+//  available before MODALS.JS (order 4) and viz scripts (order 5).
+// ═══════════════════════════════════════════════════════════════
+function ensureModalOverlay(id, opts) {
+  var el = document.getElementById(id);
+  if (!el) {
+    el = document.createElement('div'); el.className = 'modal-overlay'; el.id = id;
+    if (opts) { el.setAttribute('role', opts.role || 'dialog'); if (opts.ariaLabel) el.setAttribute('aria-label', opts.ariaLabel); }
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  VIZ SHELL BUILDER — shared by knowledge-graph & mtg-tree
+//
+//  buildVizShell(modalEl, cfg) → { closeBtn, layoutToggle, viewport, svgEl, world }
+//
+//  cfg: {
+//    cardClass, closeId, toggleId, toggleIcon, toggleTc, toggleTitle,
+//    svgClass, filterGroups[], accessibility{}
+//  }
+// ═══════════════════════════════════════════════════════════════
+function buildVizShell(modalEl, cfg) {
+  var cardCls = "glass-tile modal-card viz-modal-card" + (cfg.cardClass ? " " + cfg.cardClass : "");
+
+  // ── Filter toolbar buttons ──
+  var filterHTML = "";
+  (cfg.filterGroups || []).forEach(function (group) {
+    if (group.separator) {
+      var sepCls = group.separatorClass || "viz-filter-sep";
+      filterHTML += '<span class="' + sepCls + '" aria-hidden="true">│</span>';
+    }
+    group.items.forEach(function (item) {
+      var cls = group.btnClass || "viz-filter";
+      var active = item.active ? " active" : "";
+      var dataStr = ' data-' + group.dataAttr + '="' + item.value + '"';
+      if (group.filterGroup) dataStr += ' data-filter-group="' + group.filterGroup + '"';
+      var style = ' style="--tc:' + item.tc;
+      if (item.tcLight) style += ';--tc-light:' + item.tcLight;
+      style += '"';
+      var ariaP = item.ariaPressed != null ? ' aria-pressed="' + item.ariaPressed + '"' : '';
+      var ariaL = item.ariaLabel ? ' aria-label="' + item.ariaLabel + '"' : '';
+      var titleAttr = item.title ? ' title="' + item.title + '"' : '';
+      var dot = "";
+      if (item.allIndicator) {
+        dot = '<span class="all-indicator">' + item.allIndicator + '</span>';
+      } else if (item.dot) {
+        dot = '<span class="viz-dot" style="background:rgba(' + item.dot + ',0.9);"></span> ';
+      }
+      var label = item.trailingLabel || "";
+      filterHTML += '<button class="' + cls + active + '"' + dataStr + style + ariaP + ariaL + titleAttr + '>' +
+        dot + item.emoji + (label ? " " + label : "") + '</button>';
+    });
+  });
+
+  // ── Toggle button ──
+  var _toggleAccents = (window.__SETTINGS && window.__SETTINGS.accents) || [];
+  var toggleTc = cfg.toggleTc || (_toggleAccents[0] || "0,164,239").replace(/\s/g, '');
+  var toggleIcon = cfg.toggleIcon || "\uD83D\uDCCC";
+  var toggleTitle = cfg.toggleTitle || "Static: nodes keep their positions when filtering. Dynamic: nodes reflow into new positions.";
+  var toggleAria = ' aria-label="Toggle static or dynamic layout"';
+  var toggleHTML = '<button class="viz-layout-toggle" id="' + cfg.toggleId + '" style="--tc:' + toggleTc + '"' +
+    ' title="' + toggleTitle + '"' + toggleAria + '>' + toggleIcon + '</button>';
+
+  // ── Close button ──
+  var closeHTML = '<button class="modal-close" id="' + cfg.closeId + '" aria-label="Close modal">&times;</button>';
+
+  // ── Accessibility ──
+  var acc = cfg.accessibility || {};
+  var vpRole = acc.role ? ' role="' + acc.role + '"' : '';
+  var vpRD   = acc.ariaRoledescription ? ' aria-roledescription="' + acc.ariaRoledescription + '"' : '';
+  var vpAL   = acc.ariaLabel ? ' aria-label="' + acc.ariaLabel + '"' : '';
+  var srHTML  = "";
+  if (acc.liveRegionId) {
+    srHTML += '<div class="sr-only" id="' + acc.liveRegionId + '" aria-live="polite" aria-atomic="true"></div>';
+  }
+  if (acc.srDescriptions) {
+    acc.srDescriptions.forEach(function (desc) {
+      srHTML += '<div class="sr-only">' + desc + '</div>';
+    });
+  }
+
+  // ── Toolbar a11y ──
+  var tbRole  = acc.toolbarLabel ? ' role="toolbar" aria-label="' + acc.toolbarLabel + '"' : '';
+
+  // ── Assemble HTML ──
+  modalEl.innerHTML =
+    '<div class="' + cardCls + '" style="position:relative;">' +
+      '<div class="modal-sticky-bar">' +
+        '<div class="viz-filter-group tl-glow"' + tbRole + '>' +
+          '<div class="viz-filter-row">' +
+            toggleHTML + filterHTML + closeHTML +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="viz-viewport" style="cursor:grab;"' + vpRole + vpRD + vpAL + '>' +
+        srHTML +
+        '<div class="viz-world">' +
+          '<svg class="' + (cfg.svgClass || "kg-edges") + '" xmlns="http://www.w3.org/2000/svg" viewBox="-2000 -2000 4000 4000" aria-hidden="true"></svg>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  // ── Return DOM refs ──
+  return {
+    closeBtn: document.getElementById(cfg.closeId),
+    layoutToggle: document.getElementById(cfg.toggleId),
+    viewport: modalEl.querySelector(".viz-viewport"),
+    svgEl: modalEl.querySelector("." + (cfg.svgClass || "kg-edges")),
+    world: modalEl.querySelector(".viz-world"),
   };
 }
