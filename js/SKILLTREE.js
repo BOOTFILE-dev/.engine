@@ -653,7 +653,6 @@ function createSkillTree(cfg) {
 // ═══════════════════════════════════════════════════════════════
 (() => {
   const graphModal = document.getElementById("knowledge-modal");
-  if (!graphModal) return;
 
   /* ── Build viz shell from VIZ_THEMES (no HTML fragment needed) ── */
   const _kgFilterItems = [

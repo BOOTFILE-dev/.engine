@@ -7,7 +7,6 @@
 // ═══════════════════════════════════════════════════════════════
 (() => {
   const timelineModal = document.getElementById("timeline-modal");
-  if (!timelineModal) return;
 
   // ── Timeline modal shell (replaces TIMELINE-MODAL.HTML fragment) ──
   var _tlFilterHTML = '';

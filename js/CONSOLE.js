@@ -94,7 +94,7 @@
       if (/^Error/.test(l)) continue;
       if (l.indexOf("captureStack") !== -1) continue;
       if (l.indexOf("addLine") !== -1) continue;
-      if (l.indexOf("CONSOLE.JS") !== -1) continue;   // skip our own overrides
+      if (l.indexOf("CONSOLE.js") !== -1) continue;   // skip our own overrides
       cleaned.push(l);
     }
     return cleaned.join("\n");
