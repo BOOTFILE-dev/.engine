@@ -107,7 +107,11 @@ function buildEntryCard(item, dataset, opts) {
     ${hasGithub ? `<a href="${item.GITHUB}" target="_blank" class="entry-github" onclick="event.stopPropagation();"><i class="fa fa-github"></i> Open Source</a>` : ""}
   `;
 
-  card.addEventListener("click", () => openModal('entry', dataset, item.ID, modalImgExt));
+  if (opts.onClick) {
+    card.addEventListener("click", opts.onClick);
+  } else {
+    card.addEventListener("click", () => openModal('entry', dataset, item.ID, modalImgExt));
+  }
   if (window._revealObserver) window._revealObserver.observe(card);
   return card;
 }
@@ -146,24 +150,19 @@ function _ingestSource(key, data) {
       // Render entry cards into matching grid (convention: "{sectionId}-grid")
       var g = document.getElementById(sectionId + "-grid");
       if (!g) return;
-      var cfg = { imgExt: ".png", modalImgExt: ".png" };
 
       if (!section.items.length) {
         g.innerHTML = '<p style="color:rgba(255,255,255,0.5);font-style:italic;padding:16px;">No items.</p>';
         return;
       }
 
+      var clickAction = section.clickAction || null;
       section.items.forEach(function (item) {
-        // Items with a DECK field get deck-modal click override (data-driven, not section-name-driven)
-        if (item.DECK && item.DECK.trim()) {
-          var deckCard = buildEntryCard(item, sectionId, cfg);
-          var clone = deckCard.cloneNode(true);
-          if (window._revealObserver) window._revealObserver.observe(clone);
-          clone.addEventListener("click", function () { openModal('deck', item); });
-          g.appendChild(clone);
-        } else {
-          g.appendChild(buildEntryCard(item, sectionId, cfg));
+        var opts = { imgExt: ".png", modalImgExt: ".png" };
+        if (clickAction) {
+          opts.onClick = function () { openModal(clickAction, item); };
         }
+        g.appendChild(buildEntryCard(item, sectionId, opts));
       });
     });
   }

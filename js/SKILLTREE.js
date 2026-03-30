@@ -64,7 +64,7 @@
 //  Returns: { open, close, shell, getNodes, getHubs, getTransform, applyFilters, updateGlow }
 // ─────────────────────────────────────────────────────────────
 
-/* ── Shared text helpers (used by both portfolio & MTG trees) ── */
+/* ── Shared text helpers ── */
 const _emojiOnlyRe = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u;
 
 function fitTextToCircle(layer, circleSize, maxFont) {
@@ -274,9 +274,8 @@ function createSkillTree(cfg) {
     });
 
     _hubs.forEach(function (h) {
-      // Hide hub if its deck is filtered out
-      var deckFilter = _filterSets.deck;
-      if (h._deckId && deckFilter && !deckFilter.has(h._deckId)) {
+      // Hide hub if its group is filtered out
+      if (h._groupId && h._groupAxis && _filterSets[h._groupAxis] && !_filterSets[h._groupAxis].has(h._groupId)) {
         h._hidden = true;
         h.el.classList.add("kg-hidden");
         return;
@@ -729,7 +728,6 @@ function _radialFactory(V, rawData, key) {
   var colCfg     = V.collision || {};
   var layCfg     = V.layout   || {};
   var edgeCfg    = V.edges    || {};
-  var glowCfg    = V.glow     || {};
   var tourCfg    = V.tour     || {};
   var centerCfg  = V.center   || null;
   var filterDefs = V.filters  || [];
@@ -822,7 +820,7 @@ function _radialFactory(V, rawData, key) {
       return VIZ_resolveAccent(cs[cs.length - 1].accent);
     }
     if (nodeCfg.colorSource === "themes") {
-      var theme = VIZ_THEMES[sectorKey] || VIZ_THEMES[VIZ_SOURCE_MAP[item.ID] || "software"];
+      var theme = VIZ_THEMES[sectorKey] || VIZ_THEMES[VIZ_SOURCE_MAP[item.ID]] || VIZ_THEMES[sectorKeys[0]];
       return theme ? theme.color : "160,160,160";
     }
     return "160,160,160";
@@ -880,12 +878,15 @@ function _radialFactory(V, rawData, key) {
           result.push({ item: item, sectionId: sectionId, sector: sector });
         });
       });
-    } else if (nodeCfg.source === "sections") {
-      (rawData.sections || []).forEach(function (sec) {
-        (sec.items || []).forEach(function (item) {
-          var sector = item[nodeCfg.sectorField] || sectorKeys[0];
-          result.push({ item: item, sectionId: sec.id, sector: sector, _section: sec });
-        });
+    } else if (nodeCfg.source === "data") {
+      var itemsPath = nodeCfg.itemsPath || "items";
+      var arr = rawData[itemsPath] || [];
+      var gField = nodeCfg.groupField || null;
+      arr.forEach(function (item) {
+        var groups = gField ? (item[gField] || []) : [];
+        if (!Array.isArray(groups)) groups = [groups];
+        var sector = item[nodeCfg.sectorField] || sectorKeys[0];
+        result.push({ item: item, sectionId: groups[0] || "", sector: sector, _groupSet: groups.length ? new Set(groups) : null });
       });
     }
 
@@ -983,21 +984,21 @@ function _radialFactory(V, rawData, key) {
     });
   });
 
-  // ── Grouped-mode custom visibility (KG-style sector/overlay logic) ──
+  // ── Grouped-mode custom visibility (sector/overlay logic) ──
   var _isGrouped = filterDefs.length === 1 && filterDefs[0].mode === "grouped";
   var _groupedOverlaySet = _isGrouped ? new Set(overlayKeys) : null;
 
   function _groupedVisible(node, filterSets) {
     var active = filterSets[_filterAxes[0].key];
     if (!active) return true;
-    var quadrantOn = active.has(node._sector);
+    var sectorOn = active.has(node._sector);
     var nodeTheme = node._theme;
     var isOverlay = _groupedOverlaySet.has(nodeTheme);
-    var anyQuadrantOn = sectorKeys.some(function (q) { return active.has(q); });
+    var anySectorOn = sectorKeys.some(function (q) { return active.has(q); });
     if (isOverlay) {
-      return active.has(nodeTheme) && (!anyQuadrantOn || quadrantOn);
+      return active.has(nodeTheme) && (!anySectorOn || sectorOn);
     }
-    return quadrantOn;
+    return sectorOn;
   }
 
   // ── Bézier helpers (for thread edges) ───────────────────────
@@ -1014,22 +1015,28 @@ function _radialFactory(V, rawData, key) {
     return "M" + x1 + "," + y1 + " Q" + cx + "," + cy + " " + x2 + "," + y2;
   }
 
-  // ── Splitter for multi-emoji color values ───────────────────
-  var _colorEmojis = [];
-  if (nodeCfg.source === "sections" && rawData.categories && rawData.categories.color) {
-    _colorEmojis = Object.keys(rawData.categories.color);
-    _colorEmojis.sort(function (a, b) { return b.length - a.length; });
-  }
+  // ── Emoji splitter for multi-value fields ──────────────────
+  var _splitEmojis = {};
+  filterDefs.forEach(function (fDef) {
+    if (fDef.splitField) {
+      var catObj = rawData.categories && rawData.categories[fDef.key];
+      if (catObj) {
+        var keys = Object.keys(catObj);
+        keys.sort(function (a, b) { return b.length - a.length; });
+        _splitEmojis[fDef.key] = keys;
+      }
+    }
+  });
 
-  function _splitColorEmojis(str) {
+  function _splitEmojiValues(str, tokens) {
     var result = [];
     var rem = str;
     while (rem.length) {
       var matched = false;
-      for (var i = 0; i < _colorEmojis.length; i++) {
-        if (rem.indexOf(_colorEmojis[i]) === 0) {
-          result.push(_colorEmojis[i]);
-          rem = rem.slice(_colorEmojis[i].length);
+      for (var i = 0; i < tokens.length; i++) {
+        if (rem.indexOf(tokens[i]) === 0) {
+          result.push(tokens[i]);
+          rem = rem.slice(tokens[i].length);
           matched = true;
           break;
         }
@@ -1038,6 +1045,33 @@ function _radialFactory(V, rawData, key) {
     }
     return result;
   }
+
+  // ── Shared radial position calculator (DRY: used by both initial layout & relayout) ──
+  var _LAY_MIN  = layCfg.minDist || 80;
+  var _LAY_MAX  = layCfg.maxDist || 400;
+  var _LAY_SPREAD = 2 * Math.PI / Math.max(1, sectorKeys.length) * (layCfg.spreadFactor || 0.6);
+
+  function _radialPosition(t, idx, groupLen, baseAngle) {
+    if (SIZE_XFORM === "sqrt") t = Math.sqrt(t);
+    var dist = _LAY_MIN + t * (_LAY_MAX - _LAY_MIN);
+    var angle;
+    if (groupLen === 1) { angle = baseAngle; }
+    else {
+      var frac = idx / (groupLen - 1);
+      angle = baseAngle + _LAY_SPREAD * (frac - 0.5);
+    }
+    var s1 = Math.sin(idx * 7.3 + baseAngle * 13.7);
+    var s2 = Math.sin(idx * 11.1 + baseAngle * 5.3);
+    dist *= (1 + s1 * 0.06);
+    angle += s2 * 0.06;
+    return { x: Math.cos(angle) * dist, y: Math.sin(angle) * dist };
+  }
+
+  // ── Derive group axis key from filterDefs ───────────────────
+  var _groupAxisKey = "";
+  filterDefs.forEach(function (fd) {
+    if (fd.fromGroups) _groupAxisKey = fd.dataAttr || fd.key;
+  });
 
   // ── buildNodes callback for createSkillTree ─────────────────
   var _hubRefs = {};
@@ -1077,18 +1111,19 @@ function _radialFactory(V, rawData, key) {
       // Discover unique hub IDs from data
       var hubIds = [];
       collected.forEach(function (c) {
-        var hid = c._section ? c._section.id : (c.item[nodeCfg.hubField] || "");
-        if (hid && hubIds.indexOf(hid) === -1) hubIds.push(hid);
+        var groups = c._groupSet ? Array.from(c._groupSet) : [];
+        if (groups.length) {
+          groups.forEach(function (d) { if (hubIds.indexOf(d) === -1) hubIds.push(d); });
+        } else {
+          var hid = c.sectionId || c.item[nodeCfg.hubField] || "";
+          if (hid && hubIds.indexOf(hid) === -1) hubIds.push(hid);
+        }
       });
 
       // Resolve hub metadata from categories
-      var deckCatKey = "";
-      filterDefs.forEach(function (fd) {
-        if (fd.dataAttr === "deck" || fd.key === nodeCfg.hubField) deckCatKey = fd.key;
-      });
-      var deckCat = {};
-      if (rawData.categories && rawData.categories[deckCatKey]) deckCat = rawData.categories[deckCatKey];
-      else if (rawData.categories && rawData.categories.deck) deckCat = rawData.categories.deck;
+      var hubCatKey = _groupAxisKey || "";
+      var hubCat = {};
+      if (hubCatKey && rawData.categories && rawData.categories[hubCatKey]) hubCat = rawData.categories[hubCatKey];
 
       // Commander cards (if commanderCategory is set)
       var cmdCat = nodeCfg.commanderCategory;
@@ -1096,7 +1131,10 @@ function _radialFactory(V, rawData, key) {
       if (cmdCat) {
         collected.forEach(function (c) {
           var cat = c.item[nodeCfg.fieldMap && nodeCfg.fieldMap.category ? nodeCfg.fieldMap.category : "CATEGORY"] || c.item.category || "";
-          if (cat === cmdCat) cmdCards[c._section ? c._section.id : ""] = c;
+          if (cat === cmdCat) {
+            var groups = c._groupSet ? Array.from(c._groupSet) : [c.sectionId || ""];
+            groups.forEach(function (d) { cmdCards[d] = c; });
+          }
         });
       }
 
@@ -1104,7 +1142,7 @@ function _radialFactory(V, rawData, key) {
         var angle = (2 * Math.PI * i / hubIds.length) - Math.PI / 2;
         var hx = Math.cos(angle) * hubGap;
         var hy = Math.sin(angle) * hubGap;
-        var meta = deckCat[hid] || {};
+        var meta = hubCat[hid] || {};
         var color = meta.accent != null ? VIZ_resolveAccent(meta.accent) : (meta.color || "160,160,160");
         var icon  = meta.icon || hid.charAt(0).toUpperCase();
         var label = meta.label || hid;
@@ -1125,7 +1163,7 @@ function _radialFactory(V, rawData, key) {
         }
 
         graphWorld.appendChild(hubEl);
-        var hubRef = { el: hubEl, targetX: hx, targetY: hy, r: hubSize / 2, _hidden: false, _fixed: true, _deckId: hid, children: [] };
+        var hubRef = { el: hubEl, targetX: hx, targetY: hy, r: hubSize / 2, _hidden: false, _fixed: true, _groupId: hid, _groupAxis: _groupAxisKey, children: [] };
         hubs.push(hubRef);
         _hubRefs[hid] = hubRef;
       });
@@ -1166,10 +1204,6 @@ function _radialFactory(V, rawData, key) {
       });
     });
 
-    var MIN_DIST  = layCfg.minDist || 80;
-    var MAX_DIST  = layCfg.maxDist || 400;
-    var SPREAD    = 2 * Math.PI / Math.max(1, sectorKeys.length) * (layCfg.spreadFactor || 0.6);
-
     sectorKeys.forEach(function (sk) {
       var group = groups[sk] || [];
       if (!group.length) return;
@@ -1178,21 +1212,9 @@ function _radialFactory(V, rawData, key) {
 
       group.forEach(function (c, idx) {
         var t = sb.max > sb.min ? (c._sizeVal - sb.min) / (sb.max - sb.min) : 0.5;
-        if (SIZE_XFORM === "sqrt") t = Math.sqrt(t);
-        var dist = MIN_DIST + t * (MAX_DIST - MIN_DIST);
-        var angle;
-        if (group.length === 1) { angle = baseAngle; }
-        else {
-          var frac = idx / (group.length - 1);
-          angle = baseAngle + SPREAD * (frac - 0.5);
-        }
-        var s1 = Math.sin(idx * 7.3 + baseAngle * 13.7);
-        var s2 = Math.sin(idx * 11.1 + baseAngle * 5.3);
-        dist *= (1 + s1 * 0.06);
-        angle += s2 * 0.06;
-
-        c._x = Math.cos(angle) * dist;
-        c._y = Math.sin(angle) * dist;
+        var pos = _radialPosition(t, idx, group.length, baseAngle);
+        c._x = pos.x;
+        c._y = pos.y;
       });
     });
 
@@ -1200,28 +1222,13 @@ function _radialFactory(V, rawData, key) {
     var cmdCat2 = nodeCfg.commanderCategory;
     var fmCat   = nodeCfg.fieldMap && nodeCfg.fieldMap.category ? nodeCfg.fieldMap.category : "CATEGORY";
 
-    // ── Deduplicate (for sections source, a card may appear in multiple sections) ──
+    // ── Deduplicate & skip commanders ──────────────────────────
     var deduped = [];
-    if (nodeCfg.source === "sections") {
-      var seen = {};
-      collected.forEach(function (c) {
-        // Skip commander cards — they appear on hubs
-        var catVal = c.item[fmCat] || c.item.category || "";
-        if (cmdCat2 && catVal === cmdCat2) return;
-        var cardKey = c.item[nodeCfg.fieldMap && nodeCfg.fieldMap.cardName ? nodeCfg.fieldMap.cardName : "NAME"] || c.item.ID;
-        if (!seen[cardKey]) {
-          seen[cardKey] = { c: c, decks: new Set() };
-        }
-        seen[cardKey].decks.add(c.sectionId);
-      });
-      Object.keys(seen).forEach(function (k) {
-        var entry = seen[k];
-        entry.c._deckSet = entry.decks;
-        deduped.push(entry.c);
-      });
-    } else {
-      deduped = collected;
-    }
+    collected.forEach(function (c) {
+      var catVal = c.item[fmCat] || c.item.category || "";
+      if (cmdCat2 && catVal === cmdCat2) return;
+      deduped.push(c);
+    });
 
     // ── Create DOM nodes ──────────────────────────────────────
     deduped.forEach(function (c) {
@@ -1234,7 +1241,7 @@ function _radialFactory(V, rawData, key) {
         rgb:     rgb,
         label:   lbl,
         whisper: wsp,
-        fitRatio: nodeCfg.source === "sections" ? 0.45 : 0.50,
+        fitRatio: nodeCfg.fitRatio || 0.50,
         onClick: function () { _handleClick(c); },
       });
 
@@ -1251,17 +1258,15 @@ function _radialFactory(V, rawData, key) {
       filterDefs.forEach(function (fDef) {
         var attr = fDef.dataAttr || fDef.key;
         if (fDef.mode === "grouped") {
-          // Domain-based: VIZ maps
+          // Grouped: resolve from VIZ metadata or fall back to sector
           var src = VIZ_SOURCE_MAP[c.item.ID] || VIZ_DOMAIN_MAP[c.item.ID] || c.sector;
           filterKeys[attr] = new Set([src]);
-        } else if (attr === "deck" && c._deckSet) {
-          filterKeys[attr] = c._deckSet;
-        } else if (attr === "color" && nodeCfg.fieldMap && nodeCfg.fieldMap.color) {
-          // Multi-emoji color splitting
-          var rawColor = c.item[nodeCfg.fieldMap.color] || "";
-          var colors = _colorEmojis.length ? _splitColorEmojis(rawColor) : [rawColor];
-          if (colors.length === 0) colors = [rawColor || ""];
-          filterKeys[attr] = new Set(colors);
+        } else if (fDef.fromGroups && c._groupSet) {
+          filterKeys[attr] = c._groupSet;
+        } else if (fDef.splitField && _splitEmojis[fDef.key]) {
+          var rawSplit = c.item[fDef.splitField] || "";
+          var splitVals = _splitEmojiValues(rawSplit, _splitEmojis[fDef.key]);
+          filterKeys[attr] = new Set(splitVals.length ? splitVals : [rawSplit || ""]);
         } else {
           var rawVal = c.item[fDef.key.toUpperCase()] || c.item[fDef.key] || c.sector;
           var arrVal = Array.isArray(rawVal) ? rawVal : [rawVal];
@@ -1279,8 +1284,6 @@ function _radialFactory(V, rawData, key) {
         _entry: c,
         _sector: c.sector,
         _theme: VIZ_SOURCE_MAP[c.item.ID] || VIZ_DOMAIN_MAP[c.item.ID] || c.sector,
-        _price: c.item.PRICE || c.item.price || 0,
-        drant: c.sector,
         absMonth: c.item.DATE ? VIZ_parseDateStart(c.item.DATE) : 0,
         endMonth: c.item.DATE ? VIZ_parseDateEnd(c.item.DATE) : 0,
         dist: Math.sqrt(c._x * c._x + c._y * c._y),
@@ -1294,8 +1297,8 @@ function _radialFactory(V, rawData, key) {
 
       // Hub edges
       if (edgeCfg.connect === "hub" && nodeCfg.hubField) {
-        var deckIds = c._deckSet || new Set([c.sectionId]);
-        deckIds.forEach(function (did) {
+        var groupIds = c._groupSet || new Set([c.sectionId]);
+        groupIds.forEach(function (did) {
           var hub = _hubRefs[did];
           if (hub) {
             helpers.addEdge(hub, nodeRef, rgb, 0.7);
@@ -1348,7 +1351,7 @@ function _radialFactory(V, rawData, key) {
         if (defs) defs.appendChild(marker);
       });
 
-      // Build threads: one per overlay-theme × quadrant
+      // Build threads: one per overlay-theme × sector
       var edgeSVG = graphWorld.closest(".modal-overlay").querySelector("." + (shellCfg.svgClass || "kg-edges"));
 
       overlayKeys.forEach(function (theme) {
@@ -1387,14 +1390,14 @@ function _radialFactory(V, rawData, key) {
             path.classList.add("kg-thread");
             path.style.opacity = "0";
             path.dataset.theme = theme;
-            path.dataset.quadrant = qKey;
+            path.dataset.sector = qKey;
             path._cx1 = fx; path._cy1 = fy;
             path._ccx = cp.x; path._ccy = cp.y;
             path._cx2 = tx; path._cy2 = ty;
             if (edgeSVG) edgeSVG.appendChild(path);
             segments.push(path);
           }
-          _localThreads.push({ theme: theme, quadrant: qKey, segments: segments, nodes: chain });
+          _localThreads.push({ theme: theme, sector: qKey, segments: segments, nodes: chain });
         });
       });
     }
@@ -1438,17 +1441,17 @@ function _radialFactory(V, rawData, key) {
 
           _localThreads.forEach(function (th) {
             var themeOn    = active && active.has(th.theme);
-            var quadrantOn = active && active.has(th.quadrant);
-            var visible = themeOn && quadrantOn;
+            var sectorOn   = active && active.has(th.sector);
+            var visible = themeOn && sectorOn;
             th.segments.forEach(function (seg) {
               seg.classList.toggle("kg-thread-hidden", !visible);
               seg.style.opacity = visible ? "1" : "";
               if (visible && edgeCfg.dynamicColor) {
-                var useQuadrantColor = singleOverlay;
-                var tc = VIZ_THEMES[useQuadrantColor ? th.quadrant : th.theme];
+                var useSectorColor = singleOverlay;
+                var tc = VIZ_THEMES[useSectorColor ? th.sector : th.theme];
                 if (tc) {
                   seg.setAttribute("stroke", "rgb(" + tc.color + ")");
-                  seg.setAttribute("marker-end", "url(#thread-arrow-" + (useQuadrantColor ? th.quadrant : th.theme) + ")");
+                  seg.setAttribute("marker-end", "url(#thread-arrow-" + (useSectorColor ? th.sector : th.theme) + ")");
                 }
               }
             });
@@ -1486,18 +1489,32 @@ function _radialFactory(V, rawData, key) {
     });
 
     // ── Tour ──────────────────────────────────────────────────
-    if (tourCfg.steps && tourCfg.steps.length) {
+    var tourSteps = tourCfg.steps && tourCfg.steps.length ? tourCfg.steps : null;
+
+    // Auto-generate steps for multi-axis vizzes with no explicit steps
+    if (!tourSteps && filterDefs.length > 1) {
+      tourSteps = [];
+      _filterAxes.forEach(function (ax) {
+        ax.allValues.forEach(function (v) {
+          var step = { label: v, filters: {} };
+          step.filters[ax.key] = [v];
+          tourSteps.push(step);
+        });
+      });
+      if (!tourSteps.length) tourSteps = null;
+    }
+
+    if (tourSteps) {
       _tour = createTourEngine({
         modal:     modal,
         viewport:  modal.querySelector(".viz-viewport"),
         hintLabel: tourCfg.hintLabel || '<strong>Traverse</strong><span class="scroll-arrow">\uD83D\uDD2D</span>',
-        steps:     tourCfg.steps,
+        steps:     tourSteps,
         stepDelay: tourCfg.stepDelay || 2000,
         applyStep: function (step) {
           if (!_tree) return;
           var fs = _tree.getFilterSets();
-          if (step.filters && !step.filters.deck) {
-            // Simple array of filter keys (KG-style)
+          if (Array.isArray(step.filters)) {
             var fKey = _filterAxes[0] ? _filterAxes[0].key : "filter";
             var active = fs[fKey];
             if (active) {
@@ -1506,23 +1523,17 @@ function _radialFactory(V, rawData, key) {
               (Array.isArray(step.filters) ? step.filters : []).forEach(function (f) { active.add(f); });
             }
           } else if (step.filters) {
-            // Multi-axis filters (MTG-style)
             _filterAxes.forEach(function (ax) {
               var vals = step.filters[ax.key];
               fs[ax.key].clear();
-              if (vals) {
-                vals.forEach(function (v) { fs[ax.key].add(v); });
-              } else {
-                ax.allValues.forEach(function (v) { fs[ax.key].add(v); });
-              }
+              if (vals) { vals.forEach(function (v) { fs[ax.key].add(v); }); }
+              else { ax.allValues.forEach(function (v) { fs[ax.key].add(v); }); }
             });
           }
           _tree.syncFilterUI();
           _tree.applyFilters();
         },
-        resetAll: function () {
-          if (_tree) _tree.resetFilters();
-        },
+        resetAll:  function () { if (_tree) _tree.resetFilters(); },
         fitCamera: function () { _fitVisibleNodes(true); },
         setShowNames: function (show) {
           var vp = modal.querySelector(".viz-viewport");
@@ -1546,63 +1557,7 @@ function _radialFactory(V, rawData, key) {
           modal.querySelectorAll(".viz-filter-glow").forEach(function (el) { el.classList.remove("viz-filter-glow"); });
         },
       });
-
       _tour.createHint();
-    } else if (!tourCfg.steps && filterDefs.length > 1) {
-      // Auto-generate tour steps for multi-axis vizzes (one per deck, one per type)
-      var autoSteps = [];
-      _filterAxes.forEach(function (ax) {
-        ax.allValues.forEach(function (v) {
-          var step = { label: v, filters: {} };
-          step.filters[ax.key] = [v];
-          autoSteps.push(step);
-        });
-      });
-      if (autoSteps.length) {
-        _tour = createTourEngine({
-          modal: modal,
-          viewport: modal.querySelector(".viz-viewport"),
-          hintLabel: tourCfg.hintLabel || '<strong>Traverse</strong><span class="scroll-arrow">\uD83D\uDD2D</span>',
-          steps: autoSteps,
-          stepDelay: tourCfg.stepDelay || 2000,
-          applyStep: function (step) {
-            if (!_tree) return;
-            var fs = _tree.getFilterSets();
-            _filterAxes.forEach(function (ax) {
-              var vals = step.filters[ax.key];
-              fs[ax.key].clear();
-              if (vals) { vals.forEach(function (v) { fs[ax.key].add(v); }); }
-              else { ax.allValues.forEach(function (v) { fs[ax.key].add(v); }); }
-            });
-            _tree.syncFilterUI();
-            _tree.applyFilters();
-          },
-          resetAll: function () { if (_tree) _tree.resetFilters(); },
-          fitCamera: function () { _fitVisibleNodes(true); },
-          setShowNames: function (show) {
-            var vp = modal.querySelector(".viz-viewport");
-            if (vp) vp.classList.toggle("kg-tour-show-names", !!show);
-            if (_tree) _tree.updateGlow();
-          },
-          updateGlow: function () { if (_tree) _tree.updateGlow(); },
-          glowPills: function () {
-            modal.querySelectorAll(".viz-filter-glow").forEach(function (el) { el.classList.remove("viz-filter-glow"); });
-            var fs = _tree.getFilterSets();
-            _filterAxes.forEach(function (ax) {
-              if (fs[ax.key].size < ax.allValues.length) {
-                fs[ax.key].forEach(function (v) {
-                  var pill = modal.querySelector('.viz-filter[data-' + ax.key + '="' + v + '"]');
-                  if (pill) { void pill.offsetWidth; pill.classList.add("viz-filter-glow"); }
-                });
-              }
-            });
-          },
-          clearPillGlow: function () {
-            modal.querySelectorAll(".viz-filter-glow").forEach(function (el) { el.classList.remove("viz-filter-glow"); });
-          },
-        });
-        _tour.createHint();
-      }
     }
 
     // Stop tour on manual filter clicks
@@ -1623,16 +1578,18 @@ function _radialFactory(V, rawData, key) {
     var groups = {};
     sectorKeys.forEach(function (k) { groups[k] = []; });
     visible.forEach(function (n) {
-      var sk = n._sector || n.drant;
+      var sk = n._sector;
       if (groups[sk]) groups[sk].push(n);
     });
 
-    var MIN_DIST  = layCfg.minDist || 80;
-    var MAX_DIST  = layCfg.maxDist || 400;
-    var SPREAD    = 2 * Math.PI / Math.max(1, sectorKeys.length) * (layCfg.spreadFactor || 0.6);
     var CENTER_R2 = _centerVirtual ? _centerVirtual.r : 50;
     var PADDING2  = colCfg.padding || 2;
     var ITERS2    = colCfg.iterations || 60;
+
+    // Compute global size range for visible nodes
+    var visVals = visible.map(function (v) { return v._entry ? (v._entry._sizeVal || 0) : 0; });
+    var gMin = Math.min.apply(null, visVals), gMax = Math.max.apply(null, visVals);
+    var gRange = Math.max(1, gMax - gMin);
 
     var movable = [];
     Object.keys(groups).forEach(function (sk) {
@@ -1644,31 +1601,12 @@ function _radialFactory(V, rawData, key) {
       group.sort(function (a, b) { return (a.absMonth || 0) - (b.absMonth || 0); });
 
       group.forEach(function (n, idx) {
-        var t = 0.5;
-        if (SIZE_FIELD === "duration" && n._entry) {
-          var allM = visible.map(function (v) { return v.absMonth || 0; });
-          var gMin = Math.min.apply(null, allM), gMax = Math.max.apply(null, allM);
-          var range = Math.max(1, gMax - gMin);
-          t = range > 0 ? ((n.absMonth || 0) - gMin) / range : 0.5;
-        } else {
-          t = n._price > 0 ? Math.min(1, Math.pow(n._price / 550, 0.3)) : 0;
-          t = 1 - t; // invert: expensive → close
-        }
-        if (SIZE_XFORM === "sqrt") t = Math.sqrt(t);
-        var dist = MIN_DIST + t * (MAX_DIST - MIN_DIST);
-        var angle;
-        if (group.length === 1) { angle = baseAngle; }
-        else {
-          var frac = idx / (group.length - 1);
-          angle = baseAngle + SPREAD * (frac - 0.5);
-        }
-        var s1 = Math.sin(idx * 7.3 + baseAngle * 13.7);
-        var s2 = Math.sin(idx * 11.1 + baseAngle * 5.3);
-        dist *= (1 + s1 * 0.06);
-        angle += s2 * 0.06;
-
-        n._newX = Math.cos(angle) * dist;
-        n._newY = Math.sin(angle) * dist;
+        var t = (n._entry && n._entry._sizeVal != null)
+          ? (gRange > 0 ? ((n._entry._sizeVal || 0) - gMin) / gRange : 0.5)
+          : 0.5;
+        var pos = _radialPosition(t, idx, group.length, baseAngle);
+        n._newX = pos.x;
+        n._newY = pos.y;
         movable.push(n);
       });
     });
@@ -1718,8 +1656,8 @@ function _radialFactory(V, rawData, key) {
 
       _localThreads.forEach(function (th) {
         var themeOn    = active && active.has(th.theme);
-        var quadrantOn = active && active.has(th.quadrant);
-        if (!themeOn || !quadrantOn) return;
+        var sectorOn   = active && active.has(th.sector);
+        if (!themeOn || !sectorOn) return;
 
         th.segments.forEach(function (seg, si) {
           var fromNode = th.nodes[si];
@@ -1809,15 +1747,9 @@ function _radialFactory(V, rawData, key) {
   }
 
   // ── Boot ────────────────────────────────────────────────────
-  // For "sections" source, data may need async loading
-  if (nodeCfg.source === "sections") {
-    var srcFile = key.replace(/Modal$/, "").toUpperCase();
-    loadDataSource(srcFile).then(function () {
-      _initTree();
-    });
-  } else {
-    _initTree();
-  }
+  // Data is already loaded by the time _radialFactory is called
+  // (the outer _registerVizLayout wrapper handles async loading).
+  _initTree();
 
   return {
     el: modal,

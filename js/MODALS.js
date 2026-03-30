@@ -549,16 +549,14 @@ _constructs["deck"] = function(shell, schema, key) {
     _cardsLoading = loadCardsJSON().then(function (raw) {
       if (!raw) return [];
       var cards = [];
-      (raw.sections || []).forEach(function (sec) {
-        (sec.items || []).forEach(function (item) {
-          var typeEmoji = item.TYPE || defaultTypeEmoji;
-          var typeName  = _typeEmojiToName[typeEmoji] || typeEmoji;
-          cards.push({
-            "card name": item.NAME  || "",
-            types:       typeName,
-            art:         artTemplate.replace("{ID}", item.ID || ""),
-            deck:        sec.id,
-          });
+      (raw.cards || []).forEach(function (item) {
+        var typeEmoji = item.TYPE || defaultTypeEmoji;
+        var typeName  = _typeEmojiToName[typeEmoji] || typeEmoji;
+        cards.push({
+          "card name": item.NAME  || "",
+          types:       typeName,
+          art:         artTemplate.replace("{ID}", item.ID || ""),
+          decks:       item.DECKS || [],
         });
       });
       _allCards = cards;
@@ -778,7 +776,7 @@ _constructs["deck"] = function(shell, schema, key) {
       if (!item) return;
       var deckId = item.DECK.trim();
       _loadCards().then(function(allCards) {
-        var cards = allCards.filter(function(c) { return c.deck === deckId; });
+        var cards = allCards.filter(function(c) { return c.decks.indexOf(deckId) !== -1; });
         renderDeckModal(item, cards);
       });
     },
@@ -870,8 +868,6 @@ window.closeEntry      = function() { closeModal('entry'); };
 window.navigateToModal = navigateToModal;
 window.openGameModal   = function(url, title, nativeW, nativeH) { openModal('game', url, title, nativeW, nativeH); };
 window.closeGameModal  = function() { closeModal('game'); };
-window.openDeckModal   = function(item) { openModal('deck', item); };
-window.closeDeckModal  = function() { closeModal('deck'); };
 window.openLinkModal   = function(url, title) { openModal('link', url, title); };
 window.closeLinkModal  = function() { closeModal('link'); };
 window.openBitnaughtsModal       = function() { openModal('bitnaughts'); };
