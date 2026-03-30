@@ -12,7 +12,7 @@
 
   /* ── Config ────────────────────────────────────────────────── */
   const MAX_LINES = 6;
-  const FADE_MS   = 5000;
+  const FADE_MS   = 10000;
 
   /* ── Stash originals ───────────────────────────────────────── */
   const _log   = console.log.bind(console);

@@ -839,7 +839,7 @@ function _radialFactory(V, rawData, key) {
   function _resolveWhisper(item) {
     var w = VIZ_WHISPER_MAP[item.ID];
     if (w) return w;
-    var raw = (item[nodeCfg.whisperField || nodeCfg.labelFallback || "NAME"] || "").replace(/<[^>]+>/g, " ").trim();
+    var raw = (item[nodeCfg.whisperField] || item[nodeCfg.labelFallback] || item["NAME"] || "").replace(/<[^>]+>/g, " ").trim();
     if (nodeCfg.whisperExtract === "firstEmoji") {
       var m = raw.match(_emojiRe);
       if (m) return m[1];
