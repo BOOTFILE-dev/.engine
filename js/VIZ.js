@@ -30,14 +30,16 @@ function VIZ_resolveAccent(idx) {
   return (VIZ_ACCENTS[idx] || '').replace(/\s/g, '') || '160,160,160';
 }
 
-// ── Thematic config (loaded from SETTINGS.json → visualization.domains) ──
+// ── Thematic config ──────────────────────────────────────────
 // Maps domain key → { color (RGB string), icon (FA class), label, emoji }
-// Populated from __SETTINGS before scripts load (see index.html bootstrap).
-// SKILLTREE.JS and TIMELINE.JS all consume this shared config.
-// Accent indices are resolved here so all downstream consumers get .color strings.
-var VIZ_THEMES = (function () {
-  var raw = (window.__SETTINGS && window.__SETTINGS.visualization && window.__SETTINGS.visualization.domains) || {};
-  var out = {};
+// Populated by DATA.js from each source's domains{} during ingestion.
+// Consumers that build shells on first-open (e.g. TIMELINE.js) are
+// guaranteed VIZ_THEMES is populated by then.
+var VIZ_THEMES = {};
+
+/** Merge a domains{} map into VIZ_THEMES, resolving accent→color. */
+function VIZ_mergeThemes(raw) {
+  if (!raw) return;
   Object.keys(raw).forEach(function (k) {
     var d = raw[k];
     var resolved = {};
@@ -45,28 +47,26 @@ var VIZ_THEMES = (function () {
     if (resolved.accent != null) {
       resolved.color = VIZ_resolveAccent(resolved.accent);
     }
-    out[k] = resolved;
+    VIZ_THEMES[k] = resolved;
   });
-  return out;
-})();
+}
 
 // ── Item metadata (unified) ──────────────────────────────────
 //
-// VIZ_ITEM_META[id] = { domain, source, quadrant, whisper, shortName }
+// VIZ_ITEM_META[id] = { domain, source, sector, whisper, shortName }
 //
 // Backward-compat proxy maps (VIZ_DOMAIN_MAP, VIZ_SOURCE_MAP, etc.)
 // delegate into VIZ_ITEM_META so there's a single storage object.
 //
-// These maps are populated at runtime from PORTFOLIO.json by DATA.js.
-// Items without an entry default to "software".
+// These maps are populated at runtime by DATA.js from each JSON source.
 
 const VIZ_IS_MOBILE = window.matchMedia("(max-width: 768px)").matches;
 const VIZ_MIN_SCALE = 0.3;
 const VIZ_MAX_SCALE = 4;
 
 // ── Unified item metadata map (keyed by item ID) ────────────
-// Populated at runtime from PORTFOLIO.json by DATA.js.
-// Fields: { domain, source, quadrant, whisper, shortName, timeline:{} }
+// Populated at runtime by DATA.js from each JSON source.
+// Fields: { domain, source, sector, whisper, shortName, timeline:{} }
 const VIZ_ITEM_META = {};
 
 // Backward-compat accessors — consumers read these directly.

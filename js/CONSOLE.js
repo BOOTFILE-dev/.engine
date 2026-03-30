@@ -14,9 +14,6 @@
   const MAX_LINES = 6;
   const FADE_MS   = 5000;
 
-  /* ── Greeting ──────────────────────────────────────────────── */
-  const GREETING = "\uD83D\uDC27 Hello, World \uD83D\uDC4B\uD83C\uDFFB";
-
   /* ── Stash originals ───────────────────────────────────────── */
   const _log   = console.log.bind(console);
   const _warn  = console.warn.bind(console);
@@ -668,18 +665,6 @@
     boot();
   }
 
-  /* ── Greeting ────────────────────────────────────────────── */
-  _log(GREETING);
-  addLine(GREETING, "log");
-  if (container && container.lastElementChild) {
-    var greetTile = container.lastElementChild;
-    greetTile.style.cursor = "pointer";
-    greetTile.classList.add("dev-toast-link");
-    greetTile._onTap = function () {
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    };
-  }
-
   /* ── Bio prompt (after 1 s) ─────────────────────────────── */
   var _bioTile = null;
 
@@ -694,27 +679,49 @@
     }
   };
 
-  setTimeout(function () {
-    var BIO_TEXT = "Check my bio?";
-    _log(BIO_TEXT);
-    addLine(BIO_TEXT, "log");
-    // Make the last toast tile open the bio modal on tap
-    if (container && container.lastElementChild) {
-      var tile = container.lastElementChild;
-      _bioTile = tile;
-      tile.style.cursor = "pointer";
-      tile.classList.add("dev-toast-link");
-      tile._onTap = function () {
-        if (typeof openModal === "function") openModal('biography');
-      };
-      // Simulate hero portrait hover
-      var heroLink = document.querySelector(".hero-portrait-link");
-      if (heroLink) {
-        tile.addEventListener("mouseenter", function () { heroLink.classList.add("hover"); });
-        tile.addEventListener("mouseleave", function () { heroLink.classList.remove("hover"); });
+  // Greeting + bio prompt — driven by SETTINGS.json → console{}
+  window.addEventListener("settingsReady", function () {
+    var con = window.__SETTINGS && window.__SETTINGS.console;
+    if (!con) return;
+
+    // Greeting toast
+    if (con.greeting) {
+      _log(con.greeting);
+      addLine(con.greeting, "log");
+      if (container && container.lastElementChild) {
+        var greetTile = container.lastElementChild;
+        greetTile.style.cursor = "pointer";
+        greetTile.classList.add("dev-toast-link");
+        greetTile._onTap = function () {
+          var about = document.getElementById("about");
+          if (about) about.scrollIntoView({ behavior: "smooth", block: "start" });
+          else window.scrollTo({ top: 0, behavior: "smooth" });
+        };
       }
     }
-  }, 2000);
+
+    // Bio prompt (delayed)
+    var cfg = con.bioPrompt;
+    if (!cfg || !cfg.text) return;
+    setTimeout(function () {
+      _log(cfg.text);
+      addLine(cfg.text, "log");
+      if (container && container.lastElementChild) {
+        var tile = container.lastElementChild;
+        _bioTile = tile;
+        tile.style.cursor = "pointer";
+        tile.classList.add("dev-toast-link");
+        tile._onTap = function () {
+          if (typeof openModal === "function") openModal(cfg.modal || "biography");
+        };
+        var heroLink = document.querySelector(".hero-portrait-link");
+        if (heroLink) {
+          tile.addEventListener("mouseenter", function () { heroLink.classList.add("hover"); });
+          tile.addEventListener("mouseleave", function () { heroLink.classList.remove("hover"); });
+        }
+      }
+    }, cfg.delay || 2000);
+  });
 
   /* ── Section waypoints ──────────────────────────────────── */
   // Log a toast when the user scrolls past each section heading

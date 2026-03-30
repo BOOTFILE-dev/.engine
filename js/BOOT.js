@@ -5,9 +5,8 @@
 //    • <head> meta/title/OG/Twitter tags
 //    • <nav> brand + links
 //    • Hero identity, social links, tagline, portrait
-//    • Hero penguin background cycle
+//    • Hero emoji background cycle
 //    • Footer text
-//    • Console greeting
 //
 //  Fires `settingsReady` on window with the parsed settings
 //  so downstream scripts can consume them without re-fetching.
@@ -113,12 +112,7 @@
       var footerYear = document.getElementById("footer-year");
       if (footerYear) footerYear.textContent = new Date().getFullYear();
 
-      // ── 10. Console greeting ───────────────────────────────
-      // if (s.console && s.console.greeting) {
-      //   console.log(s.console.greeting);
-      // }
-
-      // ── 11. Connect section (mutilar) ──────────────────────
+      // ── 10. Connect section ──────────────────────
       if (s.connect) {
         var connectH2 = document.querySelector(".parallax-window-gap h2");
         if (connectH2 && s.connect.heading) connectH2.innerHTML = s.connect.heading;
@@ -138,22 +132,17 @@
         }
       }
 
-      // ── 12. Scroll hint — now rendered by DATA.JS from HERO.json
-
-      // ── 13. Viz tiles (mutilar-specific top-level) ────────
+      // ── 11. Viz tiles (mutilar-specific top-level) ────────
       if (s.vizTiles && Array.isArray(s.vizTiles)) {
         var vizContainer = document.getElementById("viz-cards");
         if (vizContainer) _hydrateVizTiles(vizContainer, s.vizTiles);
       }
 
-      // ── 14. Sections (generates band+parallax from array) ──
+      // ── 12. Sections (generates band+parallax from array) ──
       if (s.sections && Array.isArray(s.sections)) _hydrateSections(s);
 
-      // ── 15. Footer (page-level) ───────────────────────────
+      // ── 13. Footer (page-level) ───────────────────────────
       if (s.footer) _hydrateFooter(s.footer);
-
-      // ── Legacy: landing block (deprecated, backward compat) ─
-      if (s.landing && !s.sections) _hydrateLandingLegacy(s);
 
       // ── Resolve modal string refs ─────────────────────────
       // If modals[key] is a string (e.g. "BIOGRAPHY.json"), fetch

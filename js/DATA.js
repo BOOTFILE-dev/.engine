@@ -11,14 +11,13 @@
 //    2. Add "FOO.json" to SETTINGS.json → data.sources.
 //    3. If FOO.json has sections[].items[] with DATE fields,
 //       those items appear on the timeline automatically.
-//    4. If items have domain/source/quadrant, they appear on
+//    4. If items have domain/source/sector, they appear on
 //       the knowledge graph automatically.
 //    5. If a DOM element with id "{sectionId}-grid" exists,
 //       entry cards are rendered there automatically.
 //
 //  Public API:
 //    loadDataSource(name) → Promise<json>   (cached, single-fetch)
-//    loadCardsJSON()      → alias for loadDataSource("CARDS")
 //    modalState           → { sectionId: items[], … }
 //    DATA_REGISTRY        → { sourceKey: rawJson, … }
 // ═══════════════════════════════════════════════════════════════
@@ -62,8 +61,7 @@ function loadDataSource(name) {
   return _dataLoading[key];
 }
 
-/** Backward-compatible alias consumed by MODALS.JS & SKILLTREE.JS */
-function loadCardsJSON() { return loadDataSource("CARDS"); }
+
 
 // ═══════════════════════════════════════════════════════════════
 //  MODAL STATE  —  dynamic object, populated per-section at load
@@ -171,6 +169,9 @@ function _ingestSource(key, data) {
   if (data.techCategories) window.VIZ_TECH_CATEGORIES = data.techCategories;
   if (data.techTags)       window.VIZ_TECH_TAGS       = data.techTags;
 
+  // ── Domain themes (VIZ_THEMES) ─────────────────────────────
+  if (data.domains) VIZ_mergeThemes(data.domains);
+
   // ── Timeline metadata ─────────────────────────────────────
   if (data.timeline) {
     Object.assign(VIZ_TIMELINE.whispers,       data.timeline.whispers       || {});
@@ -227,10 +228,10 @@ function _renderHero(heroData) {
     html += '<img class="hero-portrait" src="' + (identity.portrait || "") + '" alt="' + (identity.name || "") + '">';
   }
 
-  html += '<span class="hero-portrait-penguin" aria-hidden="true">';
-  html += '<span class="hero-penguin-bg" id="heroPenguinBgA">' + firstEmoji + '</span>';
-  html += '<span class="hero-penguin-bg hero-penguin-bg-b" id="heroPenguinBgB"></span>';
-  html += '<span class="hero-penguin-emoji">' + (identity.emoji || "🐧") + '</span>';
+  html += '<span class="hero-portrait-emoji" aria-hidden="true">';
+  html += '<span class="hero-emoji-bg" id="heroEmojiBgA">' + firstEmoji + '</span>';
+  html += '<span class="hero-emoji-bg hero-emoji-bg-b" id="heroEmojiBgB"></span>';
+  html += '<span class="hero-emoji-glyph">' + (identity.emoji || "") + '</span>';
   html += '</span></a>';
 
   // Hero text
@@ -361,7 +362,7 @@ function _initTaglineCycle() {
   };
 }
 
-// ── Hero penguin background cycle ────────────────────────────
+// ── Hero emoji background cycle ──────────────────────────────
 function _initHeroCycle(s) {
   var link = document.querySelector(".hero-portrait-link");
   if (!link) return;
@@ -369,11 +370,11 @@ function _initHeroCycle(s) {
   var hero = s && s.hero;
   if (!hero || !Array.isArray(hero.cycle) || hero.cycle.length < 2) return;
 
-  var a       = document.getElementById("heroPenguinBgA");
-  var b       = document.getElementById("heroPenguinBgB");
-  var penguin = link.querySelector(".hero-penguin-emoji");
-  var circle  = link.querySelector(".hero-portrait-penguin");
-  if (!a || !b || !penguin) return;
+  var a       = document.getElementById("heroEmojiBgA");
+  var b       = document.getElementById("heroEmojiBgB");
+  var glyph   = link.querySelector(".hero-emoji-glyph");
+  var circle  = link.querySelector(".hero-portrait-emoji");
+  if (!a || !b || !glyph) return;
 
   var accents = Array.isArray(s.accents) ? s.accents : [];
   var glowMap = {};
@@ -400,11 +401,11 @@ function _initHeroCycle(s) {
     if (circle && glowMap[emojis[idx]])
       circle.style.setProperty("--glow", glowMap[emojis[idx]]);
     if (emojis[idx] === HIDING_EMOJI) {
-      penguin.style.transition = "opacity 0.8s ease";
-      penguin.style.opacity = "0";
-    } else if (penguin.style.opacity === "0") {
-      penguin.style.transition = "opacity 0.8s ease";
-      penguin.style.opacity = "1";
+      glyph.style.transition = "opacity 0.8s ease";
+      glyph.style.opacity = "0";
+    } else if (glyph.style.opacity === "0") {
+      glyph.style.transition = "opacity 0.8s ease";
+      glyph.style.opacity = "1";
     }
   }
 
@@ -414,8 +415,8 @@ function _initHeroCycle(s) {
     a.textContent = emojis[0];
     a.style.opacity = "0.35";
     b.style.opacity = "0";
-    penguin.style.opacity = "";
-    penguin.style.transition = "";
+    glyph.style.opacity = "";
+    glyph.style.transition = "";
     if (circle) circle.style.setProperty("--glow", glowMap[emojis[0]]);
     timer = setInterval(step, 1000);
   }
@@ -424,8 +425,8 @@ function _initHeroCycle(s) {
     if (timer) { clearInterval(timer); timer = null; }
     a.style.opacity = "0";
     b.style.opacity = "0";
-    penguin.style.opacity = "";
-    penguin.style.transition = "";
+    glyph.style.opacity = "";
+    glyph.style.transition = "";
   }
 
   link.addEventListener("mouseenter", start);

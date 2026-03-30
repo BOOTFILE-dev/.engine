@@ -12,59 +12,98 @@ window._registerVizLayout("timeline", function(schema, key) {
   var categories = schema.categories || ["robotics", "games", "software", "research", "education"];
   var timelineModal = ensureModalOverlay(schema.elementId, { ariaLabel: schema.ariaLabel || "Timeline" });
 
-  // ── Timeline modal shell (replaces TIMELINE-MODAL.HTML fragment) ──
-  var _tlFilterHTML = '';
-  var _tlAccents = (window.__SETTINGS && window.__SETTINGS.accents) || [];
-  var _tlToggleColor = (_tlAccents[2] || '242,80,34').replace(/\s/g, '');
-  _tlFilterHTML += '<button class="viz-layout-toggle dynamic" id="tlLayoutToggle" style="--tc:' + _tlToggleColor + '"' +
-    ' title="Static: items keep their positions when filtering. Dynamic: timeline reflows to fit visible items."' +
-    ' aria-label="Toggle static or dynamic layout">\uD83D\uDD00</button>';
-  _tlFilterHTML += '<button class="viz-filter active" data-filter="all" style="--tc:255,255,255;--tc-light:30,30,30" aria-pressed="true" aria-label="Show all categories"><span class="all-indicator">\u2B1C</span></button>';
-  categories.forEach(function(k) {
-    var t = VIZ_THEMES[k];
-    var tc = (t.accent != null && _tlAccents[t.accent]) ? _tlAccents[t.accent].replace(/\s/g, '') : t.color || '';
-    _tlFilterHTML += '<button class="viz-filter" data-filter="' + k + '" style="--tc:' + tc + '" aria-pressed="false" aria-label="Filter: ' + t.label + '">' +
-      '<span class="viz-dot" style="background:rgba(' + tc + ',0.9);"></span> ' + t.emoji + '</button>';
-  });
-  _tlFilterHTML += '<button class="modal-close" id="timelineModalClose" aria-label="Close modal">&times;</button>';
+  // Shell HTML is deferred to first open so VIZ_THEMES (populated
+  // from data sources by DATA.js) is guaranteed to be ready.
+  var _shellBuilt = false;
 
-  timelineModal.innerHTML =
-    '<div class="glass-tile modal-card timeline-modal-card" style="position:relative;">' +
-      '<div class="modal-sticky-bar">' +
-        '<div class="viz-filter-group viz-filter-group--flat tl-glow" role="toolbar" aria-label="Timeline filters">' +
-          _tlFilterHTML +
+  function _buildShell() {
+    if (_shellBuilt) return;
+    _shellBuilt = true;
+
+    var _tlFilterHTML = '';
+    var _tlAccents = (window.__SETTINGS && window.__SETTINGS.accents) || [];
+    var _tlToggleColor = (_tlAccents[2] || '242,80,34').replace(/\s/g, '');
+    _tlFilterHTML += '<button class="viz-layout-toggle dynamic" id="tlLayoutToggle" style="--tc:' + _tlToggleColor + '"' +
+      ' title="Static: items keep their positions when filtering. Dynamic: timeline reflows to fit visible items."' +
+      ' aria-label="Toggle static or dynamic layout">\uD83D\uDD00</button>';
+    _tlFilterHTML += '<button class="viz-filter active" data-filter="all" style="--tc:255,255,255;--tc-light:30,30,30" aria-pressed="true" aria-label="Show all categories"><span class="all-indicator">\u2B1C</span></button>';
+    categories.forEach(function(k) {
+      var t = VIZ_THEMES[k] || {};
+      var tc = (t.accent != null && _tlAccents[t.accent]) ? _tlAccents[t.accent].replace(/\s/g, '') : t.color || '';
+      _tlFilterHTML += '<button class="viz-filter" data-filter="' + k + '" style="--tc:' + tc + '" aria-pressed="false" aria-label="Filter: ' + (t.label || k) + '">' +
+        '<span class="viz-dot" style="background:rgba(' + tc + ',0.9);"></span> ' + (t.emoji || '') + '</button>';
+    });
+    _tlFilterHTML += '<button class="modal-close" id="timelineModalClose" aria-label="Close modal">&times;</button>';
+
+    timelineModal.innerHTML =
+      '<div class="glass-tile modal-card timeline-modal-card" style="position:relative;">' +
+        '<div class="modal-sticky-bar">' +
+          '<div class="viz-filter-group viz-filter-group--flat tl-glow" role="toolbar" aria-label="Timeline filters">' +
+            _tlFilterHTML +
+          '</div>' +
         '</div>' +
-      '</div>' +
-      '<div class="timeline-container" id="timeline-container" role="application" aria-roledescription="Interactive timeline" aria-label="Vertical swimlane timeline of career items. Use arrow keys to navigate between entries, Enter to open details.">' +
-        '<div class="sr-only" id="tl-live" aria-live="polite" aria-atomic="true"></div>' +
-        '<div class="sr-only">Timeline: vertical month-resolution swimlane showing career history from education through professional work. Entries are color-coded by domain. Use arrow keys to navigate entries; Enter opens details.</div>' +
-        '<div class="timeline-entries" id="timeline-entries"><p style="color:rgba(255,255,255,0.5);font-style:italic;padding:24px;">Loading timeline\u2026</p></div>' +
-      '</div>' +
-    '</div>';
+        '<div class="timeline-container" id="timeline-container" role="application" aria-roledescription="Interactive timeline" aria-label="Vertical swimlane timeline of career items. Use arrow keys to navigate between entries, Enter to open details.">' +
+          '<div class="sr-only" id="tl-live" aria-live="polite" aria-atomic="true"></div>' +
+          '<div class="sr-only">Timeline: vertical month-resolution swimlane showing career history from education through professional work. Entries are color-coded by domain. Use arrow keys to navigate entries; Enter opens details.</div>' +
+          '<div class="timeline-entries" id="timeline-entries"><p style="color:rgba(255,255,255,0.5);font-style:italic;padding:24px;">Loading timeline\u2026</p></div>' +
+        '</div>' +
+      '</div>';
 
-  const timelineModalClose = document.getElementById("timelineModalClose");
+    // Wire close button
+    var closeBtn = document.getElementById("timelineModalClose");
+    if (closeBtn) closeBtn.addEventListener("click", function () { _tlReg.close(); });
 
-  const MONTH_H   = 48;   // px per month
-  const MIN_SPAN  = 1;    // minimum 1-month height for point events
+    // Build themeConfig now that VIZ_THEMES is populated
+    categories.forEach(function (k) {
+      var src = VIZ_THEMES[k] || {};
+      themeConfig[k] = { color: src.altColor || src.color, icon: src.icon, label: src.label };
+    });
+
+    // Wire filter system
+    var allBtn = timelineModal.querySelector('.viz-filter[data-filter="all"]');
+    var themeBtns = timelineModal.querySelectorAll('.viz-filter:not([data-filter="all"])');
+    _filterSys = createFilterSystem({
+      allThemes: allThemes,
+      activeFilters: activeFilters,
+      allBtn: allBtn,
+      themeBtns: themeBtns,
+      onFilter: applyFilter,
+    });
+
+    // Wire layout toggle
+    _layoutToggle = createLayoutToggle({
+      btn: "tlLayoutToggle",
+      onDynamic: function () { if (timelineBuilt) applyFilter(); },
+      onStatic: function () {
+        if (!timelineBuilt) return;
+        _allSlivers.forEach(s => s.el.classList.remove("tl-hidden"));
+        rebuildRuler();
+        repackSlivers();
+        _allSlivers.forEach(s => {
+          var hide = activeFilters.size === 0 || !activeFilters.has(s.theme);
+          s.el.classList.toggle("tl-hidden", hide);
+        });
+      },
+      startStatic: !schema.startDynamic,
+    });
+  } // end _buildShell
+
+  const MONTH_H   = 48;
+  const MIN_SPAN  = 1;
   const MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-  const GAP = 3;          // px gap between side-by-side slivers
+  const GAP = 3;
 
   let _tlAutoScrollRAF = null;
   function _tlStopAutoScroll() { if (_tlAutoScrollRAF) { cancelAnimationFrame(_tlAutoScrollRAF); _tlAutoScrollRAF = null; } }
-  const CALENDAR_PAD = 0; // px buffer top & bottom of timeline
+  const CALENDAR_PAD = 0;
 
-  /* ── Thematic work-stream categories (from VIZ.JS) ────────── */
-  // timeline uses VIZ_THEMES with altColor for software
   const themeConfig = {};
-  categories.forEach(function (k) {
-    var src = VIZ_THEMES[k];
-    themeConfig[k] = { color: (k === "software" ? src.altColor : src.color) || src.color, icon: src.icon, label: src.label };
-  });
-
-  const themeMap = VIZ_DOMAIN_MAP;
+  const allThemes = categories;
+  let _filterSys = null;
+  let _layoutToggle = null;
 
   function getTheme(item) {
-    return themeMap[item.ID] || "software";
+    return VIZ_DOMAIN_MAP[item.ID] || categories[0];
   }
 
   let timelineBuilt = false;
@@ -75,7 +114,8 @@ window._registerVizLayout("timeline", function(schema, key) {
     key: key,
     ariaLabel: schema.ariaLabel || "Timeline",
     onOpen: function () {
-      _filterSys.setAll();
+      _buildShell();
+      if (_filterSys) _filterSys.setAll();
       if (!timelineBuilt) buildTimeline();
       const hud = document.getElementById("tl-whisper-hud");
       if (hud) hud.classList.add("tl-whisper-active");
@@ -93,71 +133,30 @@ window._registerVizLayout("timeline", function(schema, key) {
       if (hud) hud.classList.remove("tl-whisper-active");
     }
   });
-  function openTimelineModal()  { _tlReg.open(); }
-  function closeTimelineModal() { _tlReg.close(); }
 
-  window.openTimelineModal  = openTimelineModal;
-  window.closeTimelineModal = closeTimelineModal;
-
-  // ── Filter buttons (via VIZ.JS shared filter system) ────────
-  const allThemes = categories;
-  const allBtn = timelineModal.querySelector('.viz-filter[data-filter="all"]');
-  const themeBtns = timelineModal.querySelectorAll('.viz-filter:not([data-filter="all"])');
-
-  const _filterSys = createFilterSystem({
-    allThemes: allThemes,
-    activeFilters: activeFilters,
-    allBtn: allBtn,
-    themeBtns: themeBtns,
-    onFilter: applyFilter,
-  });
-
-  /* ── Layout toggle (Static / Dynamic) via shared VIZ.JS utility ── */
-  const _layoutToggle = createLayoutToggle({
-    btn: "tlLayoutToggle",
-    onDynamic: function () { if (timelineBuilt) applyFilter(); },
-    onStatic: function () {
-      if (!timelineBuilt) return;
-      // Restore full-range layout: unhide all, repack, then re-apply filter visibility
-      _allSlivers.forEach(s => s.el.classList.remove("tl-hidden"));
-      rebuildRuler();
-      repackSlivers();
-      // Now re-hide the filtered-out slivers (positions are locked to full range)
-      _allSlivers.forEach(s => {
-        var hide = activeFilters.size === 0 || !activeFilters.has(s.theme);
-        s.el.classList.toggle("tl-hidden", hide);
-      });
-    },
-    startStatic: !schema.startDynamic,
-  });
+  window.openTimelineModal  = function () { _tlReg.open(); };
+  window.closeTimelineModal = function () { _tlReg.close(); };
 
   /** All layout data is stored here after first build */
-  let _allSlivers = [];   // { el, startOff, endOff, theme, category }
+  let _allSlivers = [];
   let _container   = null;
   let _globalMin   = 0;
   let _globalMax   = 0;
 
   function applyFilter() {
     if (!timelineBuilt) return;
-    // hide/show slivers by theme (multi-select)
     _allSlivers.forEach(s => {
       const hide = activeFilters.size === 0 || !activeFilters.has(s.theme);
       s.el.classList.toggle("tl-hidden", hide);
     });
-
-    // Static mode: just toggle visibility, keep positions/ruler stable
-    if (_layoutToggle.isStatic()) return;
-
-    // Dynamic mode: rebuild ruler + repack to constrain to visible range
+    if (_layoutToggle && _layoutToggle.isStatic()) return;
     rebuildRuler();
     repackSlivers();
   }
 
-  // ── Date parsing (delegated to VIZ.JS) ─────────────────────
   var parseDateRanges = VIZ_parseDateRanges;
   var absMonth        = VIZ_absMonth;
 
-  // ── Build ──────────────────────────────────────────────────
   function buildTimeline() {
     // Dynamic: include any modalState section whose items have DATE fields
     const datasets = Object.keys(modalState).filter(function (k) {
@@ -766,7 +765,7 @@ window._registerVizLayout("timeline", function(schema, key) {
   /** Build a single sliver DOM element */
   function buildSliver(s) {
     const { item, category, theme, r, titleOverride, nameOverride } = s;
-    const cfg = themeConfig[theme] || themeConfig.software;
+    const cfg = themeConfig[theme] || themeConfig[categories[0]] || { color: '160,160,160' };
 
     const el = document.createElement("div");
     el.className = "tl-sliver";

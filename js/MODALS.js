@@ -1,5 +1,5 @@
 // ═════════════════════════════════════════════════════════════════
-//  GLOBALS FROM DATA.JS  —  loadCardsJSON(), modalState
+//  GLOBALS FROM DATA.JS  —  loadDataSource(), modalState
 //  (DATA.JS is loaded before MODALS.JS)
 // ═════════════════════════════════════════════════════════════════
 
@@ -513,7 +513,7 @@ _constructs["pdf"] = function(shell, schema, key) {
 // buildVizShell has moved to VIZ.JS (order 3).
 
 // ┌─────────────────────────────────────────────────────────────┐
-// │  CONSTRUCT: deck — MTG deck carousel modal                  │
+// │  CONSTRUCT: deck — collection carousel modal                │
 // └─────────────────────────────────────────────────────────────┘
 _constructs["deck"] = function(shell, schema, key) {
   var slot = shell.content;
@@ -530,43 +530,58 @@ _constructs["deck"] = function(shell, schema, key) {
 
   var _deckReg = registerModal(schema.elementId, { key: key });
 
-  // All deck display data lives in SETTINGS.json → modals.deck
-  var typeIcons = schema.typeIcons || {};
-  var typeOrder = schema.typeOrder || Object.keys(typeIcons);
-  var plurals   = schema.plurals   || {};
-  var artTemplate     = schema.artPathTemplate || "png/card_art/{ID}/art.png";
-  var defaultTypeEmoji = schema.defaultType     || "🧛";
-  var _typeEmojiToName = {};
-  Object.keys(typeIcons).forEach(function (name) { _typeEmojiToName[typeIcons[name]] = name; });
+  // Data-level config comes from the data source itself (raw.collection).
+  // Schema in SETTINGS.json is fallback only for modal-chrome concerns.
+  var dataSource  = schema.dataSource  || "CARDS";
+  var groupField  = schema.groupField  || "DECK";
+  var groupsField = schema.groupsField || "DECKS";
 
   var sectionStates = [];
-  var _allCards = null;
-  var _cardsLoading = null;
+  var _cached = null;   // { items: [], cfg: {} }
+  var _loading = null;
 
-  function _loadCards() {
-    if (_allCards) return Promise.resolve(_allCards);
-    if (_cardsLoading) return _cardsLoading;
-    _cardsLoading = loadCardsJSON().then(function (raw) {
-      if (!raw) return [];
-      var cards = [];
-      (raw.cards || []).forEach(function (item) {
-        var typeEmoji = item.TYPE || defaultTypeEmoji;
-        var typeName  = _typeEmojiToName[typeEmoji] || typeEmoji;
-        cards.push({
-          "card name": item.NAME  || "",
-          types:       typeName,
-          art:         artTemplate.replace("{ID}", item.ID || ""),
-          decks:       item.DECKS || [],
+  function _loadCollection() {
+    if (_cached) return Promise.resolve(_cached);
+    if (_loading) return _loading;
+    _loading = loadDataSource(dataSource).then(function (raw) {
+      if (!raw) return { items: [], cfg: {} };
+
+      // Data source self-describes its own structure
+      var meta = raw.collection || {};
+      var cfg = {
+        typeIcons:   meta.typeIcons   || {},
+        typeOrder:   meta.typeOrder   || null,
+        plurals:     meta.plurals     || {},
+        artTemplate: meta.artPathTemplate || "png/{ID}.png",
+        defaultType: meta.defaultType || "",
+        nameSep:     meta.nameSeparator  || null,
+      };
+      if (!cfg.typeOrder) cfg.typeOrder = Object.keys(cfg.typeIcons);
+
+      var typeMap = {};
+      Object.keys(cfg.typeIcons).forEach(function (name) { typeMap[cfg.typeIcons[name]] = name; });
+
+      var itemsKey = meta.itemsKey || "items";
+      var items = [];
+      (raw[itemsKey] || []).forEach(function (item) {
+        var typeEmoji = item.TYPE || cfg.defaultType;
+        var typeName  = typeMap[typeEmoji] || typeEmoji;
+        items.push({
+          name:   item.NAME || "",
+          types:  typeName,
+          art:    cfg.artTemplate.replace("{ID}", item.ID || ""),
+          groups: item[groupsField] || [],
         });
       });
-      _allCards = cards;
-      return cards;
+
+      _cached = { items: items, cfg: cfg };
+      return _cached;
     });
-    return _cardsLoading;
+    return _loading;
   }
 
-  function pluralize(type) {
-    return plurals[type] || (type + "s");
+  function pluralize(type, cfg) {
+    return (cfg.plurals && cfg.plurals[type]) || (type + "s");
   }
 
   function getArtSrc(card) {
@@ -595,8 +610,8 @@ _constructs["deck"] = function(shell, schema, key) {
       var el = document.createElement("div");
       el.className = "deck-card";
       el.setAttribute("data-pos", getPos(i, state.index));
-      el.innerHTML = '<img src="' + getArtSrc(card) + '" alt="' + (card["card name"] || "") + '" loading="lazy" />' +
-        '<div class="deck-card-name">' + (card["card name"] || "") + '</div>';
+      el.innerHTML = '<img src="' + getArtSrc(card) + '" alt="' + (card.name || "") + '" loading="lazy" />' +
+        '<div class="deck-card-name">' + (card.name || "") + '</div>';
       (function (st, idx) {
         el.addEventListener("click", function () {
           var clickPos = getPos(idx, st.index);
@@ -625,17 +640,18 @@ _constructs["deck"] = function(shell, schema, key) {
     state.counterEl.textContent = (state.index + 1) + " / " + state.cards.length;
   }
 
-  function renderDeckModal(item, cards) {
-    var commanderName = (item.TITLE || "").replace(/:/g, ",");
-    var commanderCard = cards.find(function (c) {
-      var name = c["card name"] || "";
-      return name.toLowerCase().includes(commanderName.toLowerCase()) ||
-        commanderName.toLowerCase().includes(name.split(" // ")[0].toLowerCase());
+  function renderDeckModal(item, cards, cfg) {
+    var heroName = (item.TITLE || "").replace(/:/g, ",");
+    var heroCard = cards.find(function (c) {
+      var n = c.name || "";
+      var match = n.toLowerCase().includes(heroName.toLowerCase());
+      if (!match && cfg.nameSep) match = heroName.toLowerCase().includes(n.split(cfg.nameSep)[0].toLowerCase());
+      return match;
     });
 
     var heroImg = document.getElementById("deck-hero-img");
-    if (commanderCard && commanderCard.art && commanderCard.art.trim()) {
-      heroImg.src = commanderCard.art;
+    if (heroCard && heroCard.art && heroCard.art.trim()) {
+      heroImg.src = heroCard.art;
     } else {
       heroImg.src = "";
     }
@@ -656,9 +672,9 @@ _constructs["deck"] = function(shell, schema, key) {
     }
 
     var typeGroups = {};
-    typeOrder.forEach(function (t) { typeGroups[t] = []; });
+    cfg.typeOrder.forEach(function (t) { typeGroups[t] = []; });
     cards.forEach(function (c) {
-      if (c === commanderCard) return;
+      if (c === heroCard) return;
       var types = (c.types || "").split(",").map(function (t) { return t.trim(); }).filter(Boolean);
       var seen = {};
       types.forEach(function (t) {
@@ -670,22 +686,22 @@ _constructs["deck"] = function(shell, schema, key) {
     sectionsEl.innerHTML = "";
     sectionStates = [];
 
-    typeOrder.forEach(function (type) {
+    cfg.typeOrder.forEach(function (type) {
       var group = typeGroups[type];
       if (group.length === 0) return;
       group.sort(function (a, b) {
         var aHas = a.art && a.art.trim() ? 0 : 1;
         var bHas = b.art && b.art.trim() ? 0 : 1;
         if (aHas !== bHas) return aHas - bHas;
-        return (a["card name"] || "").localeCompare(b["card name"] || "");
+        return (a.name || "").localeCompare(b.name || "");
       });
 
       var section = document.createElement("div");
       section.className = "deck-section";
       section.innerHTML =
         '<div class="deck-section-heading">' +
-        '<span class="deck-section-icon">' + (typeIcons[type] || "") + '</span>' +
-        '<span class="deck-section-label">' + pluralize(type) + '</span>' +
+        '<span class="deck-section-icon">' + (cfg.typeIcons[type] || "") + '</span>' +
+        '<span class="deck-section-label">' + pluralize(type, cfg) + '</span>' +
         '</div>';
 
       var wrap = document.createElement("div");
@@ -738,8 +754,8 @@ _constructs["deck"] = function(shell, schema, key) {
         for (var si = 0; si < sectionStates.length; si++) {
           var st = sectionStates[si];
           for (var ci = 0; ci < st.cards.length; ci++) {
-            var name = (st.cards[ci]["card name"] || "").toLowerCase();
-            if (name === target || name.indexOf(target) !== -1 || target.indexOf(name.split(" // ")[0]) !== -1) {
+            var name = (st.cards[ci].name || "").toLowerCase();
+            if (name === target || name.indexOf(target) !== -1 || (cfg.nameSep && target.indexOf(name.split(cfg.nameSep)[0]) !== -1)) {
               st.index = ci;
               updateSectionPositions(st);
               var sectionEl = st.carouselEl.closest(".deck-section");
@@ -774,10 +790,10 @@ _constructs["deck"] = function(shell, schema, key) {
     el: _deckReg.el,
     open: function(item) {
       if (!item) return;
-      var deckId = item.DECK.trim();
-      _loadCards().then(function(allCards) {
-        var cards = allCards.filter(function(c) { return c.decks.indexOf(deckId) !== -1; });
-        renderDeckModal(item, cards);
+      var groupId = (item[groupField] || "").trim();
+      _loadCollection().then(function(collection) {
+        var cards = collection.items.filter(function(c) { return c.groups.indexOf(groupId) !== -1; });
+        renderDeckModal(item, cards, collection.cfg);
       });
     },
     close: _deckReg.close
@@ -963,20 +979,20 @@ function _resolveAccentColor(tile, accents) {
   return '';
 }
 
-function hydrateBiographyModalFromSettings(settings) {
-  var schema = settings && settings.modals && settings.modals.biography;
-  var elId = (schema && schema.elementId) || 'biography-modal';
+function hydrateBiographyModal(data, settings) {
+  var schema = (settings && settings.modals && settings.modals.biography) || {};
+  var elId = schema.elementId || 'biography-modal';
   var modal = document.getElementById(elId);
   if (!modal) {
-    // Auto-create the overlay (same pattern as registerModal)
     modal = document.createElement('div');
     modal.className = 'modal-overlay';
     modal.id = elId;
     modal.setAttribute('role', 'dialog');
     document.body.appendChild(modal);
   }
-  if (!schema) return;
-  if (!Array.isArray(schema.sections) || !schema.sections.length) return;
+  if (!data) return;
+  var sections = data.sections;
+  if (!Array.isArray(sections) || !sections.length) return;
 
   // Build outer shell
   var shell = [];
@@ -991,7 +1007,7 @@ function hydrateBiographyModalFromSettings(settings) {
 
   var html = [];
 
-  (schema.sections || []).forEach(function (section) {
+  sections.forEach(function (section) {
     if (!section || !section.heading) return;
 
     html.push('<h3 data-bio-tour="' + _escapeHtmlBio(section.tour || section.heading) + '">' + _escapeHtmlBio(section.heading) + '</h3>');
@@ -1065,21 +1081,21 @@ function hydrateBiographyModalFromSettings(settings) {
     html.push('<hr>');
   });
 
-  if (schema.title || schema.url) {
-    var title = _escapeHtmlBio(schema.title || '');
-    var url = _escapeHtmlBio(schema.url || '#');
+  if (data.title || data.url) {
+    var title = _escapeHtmlBio(data.title || '');
+    var url = _escapeHtmlBio(data.url || '#');
     html.push('<footer class="glass-footer">');
     html.push('<p><strong><a href="#" onclick="event.preventDefault(); openModal(\'biography\');" style="text-decoration:none;cursor:pointer;">' + title + '</a></strong><br><strong><a href="' + url + '">' + url + '</a></strong></p>');
     html.push('</footer>');
     html.push('<hr>');
   }
 
-  var explore = schema.explore || {};
+  var explore = data.explore || {};
   html.push('<div class="scroll-hint bio-explore-hint" id="bioExploreHint" style="cursor:pointer;"><strong>' + _escapeHtmlBio(explore.label || 'Traverse') + '</strong><span class="scroll-arrow">' + _escapeHtmlBio(explore.emoji || '🔭') + '</span></div>');
 
   body.innerHTML = html.join('');
 }
-window.hydrateBiographyModalFromSettings = hydrateBiographyModalFromSettings;
+window.hydrateBiographyModal = hydrateBiographyModal;
 
 // ═══════════════════════════════════════════════════════════════
 //  BIOGRAPHY MODAL — wiring
@@ -1380,10 +1396,15 @@ _stopBioTour = _wireBioTour(quiltModal);
 // Derive modal ID from SETTINGS (no hardcoded DOM sniffing).
 function _bootBiography(settings) {
   var schema = settings && settings.modals && settings.modals.biography;
-  var id = (schema && schema.elementId) || 'biography-modal';
-  hydrateBiographyModalFromSettings(settings);
-  var el = document.getElementById(id);
-  if (el) _initBioWiring(el, id);
+  if (!schema) return;
+  var id = schema.elementId || 'biography-modal';
+  var dataSource = schema.dataSource || 'BIOGRAPHY';
+  loadDataSource(dataSource).then(function (data) {
+    if (!data) return;
+    hydrateBiographyModal(data, settings);
+    var el = document.getElementById(id);
+    if (el) _initBioWiring(el, id);
+  });
 }
 
 if (window.__SETTINGS && window.__SETTINGS.modals && typeof window.__SETTINGS.modals.biography === 'object') {

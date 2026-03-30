@@ -253,6 +253,7 @@ a.scroll-hint:hover strong {
   left: 0;
   right: 0;
   z-index: 100;
+  min-height: 63px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -882,8 +883,8 @@ a.scroll-hint:hover strong {
   flex-shrink: 0;
 }
 
-/* Penguin overlay */
-.hero-portrait-penguin {
+/* emoji overlay */
+.hero-portrait-emoji {
   --glow: var(--accent-1);
   position: absolute;
   inset: 0;
@@ -909,18 +910,18 @@ a.scroll-hint:hover strong {
   opacity: 0;
 }
 
-.hero-portrait-link:hover .hero-portrait-penguin,
-.hero-portrait-link.hover .hero-portrait-penguin {
+.hero-portrait-link:hover .hero-portrait-emoji,
+.hero-portrait-link.hover .hero-portrait-emoji {
   opacity: 1;
 }
 
-.hero-penguin-emoji {
+.hero-emoji-glyph {
   display: inline-block;
   position: relative;
   z-index: 2;
 }
 
-.hero-penguin-bg {
+.hero-emoji-bg {
   position: absolute;
   inset: 0;
   display: flex;
@@ -934,13 +935,13 @@ a.scroll-hint:hover strong {
   pointer-events: none;
 }
 
-.hero-penguin-bg-b {
+.hero-emoji-bg-b {
   opacity: 0;
 }
 
-.hero-portrait-link:hover .hero-penguin-emoji,
-.hero-portrait-link.hover .hero-penguin-emoji {
-  animation: kg-penguin-bounce 1s ease infinite;
+.hero-portrait-link:hover .hero-emoji-glyph,
+.hero-portrait-link.hover .hero-emoji-glyph {
+  animation: kg-emoji-bounce 1s ease infinite;
 }
 
 .hero-portrait:hover {
@@ -3406,7 +3407,7 @@ html.light-mode .hero-portrait:hover {
   box-shadow: 0 6px 30px rgba(0, 0, 0, 0.15);
 }
 
-html.light-mode .hero-portrait-penguin {
+html.light-mode .hero-portrait-emoji {
   background: #fff;
   border-color: rgba(var(--glow), 0.5);
   box-shadow: 0 0 50px rgba(var(--glow), 0.4),
@@ -5489,10 +5490,10 @@ html.light-mode .viz-filter.filter-pulse {
 }
 
 .kg-node-center:hover .kg-node-icon {
-  animation: kg-penguin-bounce 1s ease infinite;
+  animation: kg-emoji-bounce 1s ease infinite;
 }
 
-@keyframes kg-penguin-bounce {
+@keyframes kg-emoji-bounce {
   0%, 100% { transform: translateY(0); }
   30%      { transform: translateY(-6px); }
   50%      { transform: translateY(0); }
@@ -5520,7 +5521,7 @@ html.light-mode .viz-filter.filter-pulse {
 }
 
 .kg-node:hover .kg-node-name {
-  animation: kg-penguin-bounce 1s ease infinite;
+  animation: kg-emoji-bounce 1s ease infinite;
 }
 
 /* Crossfade layers: name ↔ whisper */
